@@ -40,6 +40,7 @@ export type CurfewStatus = {
   sessionStartsAt: string | null;
   sessionPhase: SessionPhase;
   sessionActive: boolean;
+  scheduleLocked: boolean;
   playAllowed: boolean;
   shouldBlockPlay: boolean;
   blockAction: "terminate";
@@ -49,7 +50,10 @@ export type CurfewStatus = {
   shouldWarn: boolean;
   cutoffAt: string | null;
   allowAt: string | null;
+  nextBlockAt: string | null;
+  scheduleSummary: string | null;
   statusLine: string;
+  nextLine: string | null;
   lockLine: string | null;
   settings: CurfewSettings;
   pluginVersion?: string;

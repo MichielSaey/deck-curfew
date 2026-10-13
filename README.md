@@ -39,7 +39,7 @@ pnpm i
 pnpm run package
 ```
 
-That writes `out/DeckCurfew-v0.3.0.zip`.
+That writes `out/DeckCurfew-v0.3.1.zip`.
 
 ### Deploy over SSH (dev)
 

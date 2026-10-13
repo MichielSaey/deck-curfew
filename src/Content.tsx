@@ -8,7 +8,7 @@ import {
   showModal,
 } from "@decky/ui";
 import { toaster } from "@decky/api";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelPendingSession,
   checkForUpdate,
@@ -21,6 +21,7 @@ import {
 } from "./api";
 import { applyStatus } from "./enforce";
 import type { CurfewStatus, UpdateInfo } from "./types";
+import { PLUGIN_VERSION } from "./version";
 
 function isHhMm(value: string): boolean {
   return /^([01]?\d|2[0-3]):[0-5]\d$/.test(value.trim());
@@ -51,6 +52,17 @@ function secondsUntil(iso: string | null | undefined, nowMs: number): number | n
   return Math.max(0, Math.floor((target - nowMs) / 1000));
 }
 
+function formatWhen(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString(undefined, {
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export function Content() {
   const [status, setStatus] = useState<CurfewStatus | null>(null);
   const [blockAfter, setBlockAfter] = useState("21:00");
@@ -58,35 +70,43 @@ export function Content() {
   const [warnMinutes, setWarnMinutes] = useState("5");
   const [sessionDuration, setSessionDuration] = useState("5");
   const [sessionDelay, setSessionDelay] = useState("0");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saveNote, setSaveNote] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const fieldsSynced = useRef(false);
+
+  const applyBackendStatus = useCallback((next: CurfewStatus, syncFields = false) => {
+    setStatus(next);
+    if (syncFields || !fieldsSynced.current) {
+      setBlockAfter(next.settings.blockAfter);
+      setWeekendBlockAfter(next.settings.weekendBlockAfter);
+      setWarnMinutes(String(next.settings.warnMinutes));
+      fieldsSynced.current = true;
+    }
+    if (next.update) setUpdateInfo(next.update);
+    setNowMs(Date.now());
+    void applyStatus(next);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
       const next = await getStatus();
-      setStatus(next);
-      setBlockAfter(next.settings.blockAfter);
-      setWeekendBlockAfter(next.settings.weekendBlockAfter);
-      setWarnMinutes(String(next.settings.warnMinutes));
-      if (next.update) setUpdateInfo(next.update);
+      applyBackendStatus(next);
       setError(null);
-      void applyStatus(next);
-      setNowMs(Date.now());
     } catch (err) {
       console.error(err);
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, []);
+  }, [applyBackendStatus]);
 
   useEffect(() => {
     void refresh();
-    const id = setInterval(() => void refresh(), 5000);
+    const id = setInterval(() => void refresh(), 3000);
     return () => clearInterval(id);
   }, [refresh]);
 
-  // Local 1s tick for smooth countdown between backend polls
   useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(id);
@@ -102,7 +122,7 @@ export function Content() {
       setError("Warn minutes must be 0–120.");
       return;
     }
-    setBusy(true);
+    setBusy("save");
     try {
       const next = await updateSchedule({
         mode: "block_after",
@@ -110,49 +130,48 @@ export function Content() {
         weekendBlockAfter: weekendBlockAfter.trim(),
         warnMinutes: warn,
       });
-      setStatus(next);
-      void applyStatus(next);
+      applyBackendStatus(next, true);
       setError(null);
-      toaster.toast({ title: "Deck Curfew", body: "Schedule saved." });
+      const note = next.scheduleLocked
+        ? `Schedule saved & enforcing — ${next.scheduleSummary}`
+        : `Schedule saved — ${next.scheduleSummary}. Turn on Lock schedule to enforce.`;
+      setSaveNote(note);
+      toaster.toast({ title: "Deck Curfew", body: note });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   const confirmSession = (duration: number, delay: number) => {
-    const when =
-      delay <= 0
-        ? `now for ${formatDuration(duration)}`
-        : `after a ${formatDuration(delay)} countdown, then for ${formatDuration(duration)}`;
     showModal(
       <ConfirmModal
         strTitle={delay > 0 ? "Arm curfew session?" : "Start curfew session?"}
         strDescription={
           delay > 0
-            ? `A countdown will run first — the session is not active yet. Then games will be blocked ${when}. Once active, you cannot cancel.`
-            : `Games will be blocked ${when}. You cannot cancel once started.`
+            ? `Countdown ${formatDuration(delay)}, then block all games for ${formatDuration(duration)}. Cancel anytime before it starts.`
+            : `Block all games for ${formatDuration(duration)}. No cancel once started.`
         }
         strOKButtonText={delay > 0 ? "Arm session" : "Start session"}
         onOK={async () => {
-          setBusy(true);
+          setBusy("session");
           try {
             const next = await startSession(duration, delay);
-            setStatus(next);
-            void applyStatus(next);
+            applyBackendStatus(next);
             setError(null);
+            setSaveNote(null);
             toaster.toast({
               title: "Deck Curfew",
               body:
                 delay > 0
-                  ? `Countdown started — session activates in ${formatDuration(delay)}.`
-                  : "Session started.",
+                  ? `Countdown started — activates in ${formatDuration(delay)}.`
+                  : "Session started — games blocked.",
             });
           } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
           } finally {
-            setBusy(false);
+            setBusy(null);
           }
         }}
       />
@@ -173,47 +192,60 @@ export function Content() {
     confirmSession(Math.floor(duration), Math.floor(delay));
   };
 
-  const confirmLock = (preset: string, label: string) => {
+  const enableScheduleLock = (preset: string, label: string) => {
     showModal(
       <ConfirmModal
-        strTitle="Lock schedule curfew?"
-        strDescription={`Settings freeze until ${label}. Play follows your block-after schedule. No unlock button.`}
-        strOKButtonText="Lock"
+        strTitle="Lock schedule?"
+        strDescription={`Enforce weekday/weekend cutoffs and freeze settings until ${label}. You cannot turn this off early from the plugin.`}
+        strOKButtonText="Lock schedule"
         onOK={async () => {
-          setBusy(true);
+          setBusy("lock");
           try {
             const next = await lockPreset(preset);
-            setStatus(next);
-            void applyStatus(next);
+            applyBackendStatus(next, true);
             setError(null);
-            toaster.toast({ title: "Deck Curfew", body: `Locked until ${label}.` });
+            setSaveNote(`Schedule locked until ${label}`);
+            toaster.toast({
+              title: "Deck Curfew",
+              body: `Schedule locked — ${next.statusLine}`,
+            });
           } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
           } finally {
-            setBusy(false);
+            setBusy(null);
           }
         }}
       />
     );
   };
 
+  const onLockToggle = (enabled: boolean) => {
+    if (!enabled) {
+      toaster.toast({
+        title: "Deck Curfew",
+        body: "Schedule lock cannot be turned off early — wait for the commitment to end.",
+      });
+      return;
+    }
+    enableScheduleLock("tomorrow_8", "tomorrow 08:00");
+  };
+
   const onCancelPending = async () => {
-    setBusy(true);
+    setBusy("cancel");
     try {
       const next = await cancelPendingSession();
-      setStatus(next);
-      void applyStatus(next);
+      applyBackendStatus(next);
       setError(null);
       toaster.toast({ title: "Deck Curfew", body: "Upcoming session cancelled." });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   const onCheckUpdate = async () => {
-    setBusy(true);
+    setBusy("update");
     try {
       const info = await checkForUpdate();
       setUpdateInfo(info);
@@ -222,12 +254,12 @@ export function Content() {
         title: "Deck Curfew",
         body: info.updateAvailable
           ? `Update available: v${info.latest}`
-          : `Up to date (v${info.current})`,
+          : `Up to date (v${info.current || PLUGIN_VERSION})`,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
@@ -238,7 +270,7 @@ export function Content() {
         strDescription="Downloads the latest release from GitHub and reloads Decky. Not available while a session or lock is active."
         strOKButtonText="Install"
         onOK={async () => {
-          setBusy(true);
+          setBusy("update");
           try {
             const info = await installUpdate();
             setUpdateInfo(info);
@@ -251,7 +283,7 @@ export function Content() {
           } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
           } finally {
-            setBusy(false);
+            setBusy(null);
           }
         }}
       />
@@ -259,22 +291,25 @@ export function Content() {
   };
 
   const onToggleAutoUpdate = async (enabled: boolean) => {
-    setBusy(true);
+    setBusy("autoupdate");
     try {
       const next = await setAutoUpdate(enabled);
-      setStatus(next);
-      if (next.update) setUpdateInfo(next.update);
+      applyBackendStatus(next);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
-  const locked = status?.locked ?? false;
   const phase = status?.sessionPhase ?? "none";
-  const version = status?.pluginVersion ?? updateInfo?.current ?? "…";
+  const scheduleLocked = status?.scheduleLocked ?? false;
+  const sessionBusy = phase === "pending" || phase === "active";
+  const version =
+    status?.pluginVersion ||
+    updateInfo?.current ||
+    PLUGIN_VERSION;
   const autoUpdate = status?.settings.autoUpdate ?? true;
 
   const pendingSeconds =
@@ -282,24 +317,59 @@ export function Content() {
   const activeSeconds =
     phase === "active" ? secondsUntil(status?.lockedUntil, nowMs) : null;
 
-  const statusDisplay =
-    phase === "pending" && pendingSeconds != null
-      ? `Countdown ${formatCountdown(pendingSeconds)} — session not active yet`
-      : phase === "active" && activeSeconds != null
-        ? `Session active — ${formatCountdown(activeSeconds)} left`
-        : (status?.statusLine ?? "Loading…");
+  let statusDisplay = status?.statusLine ?? (error ? "Could not load status" : "Loading status…");
+  if (phase === "pending" && pendingSeconds != null) {
+    statusDisplay = `Session starts in ${formatCountdown(pendingSeconds)}`;
+  } else if (phase === "active" && activeSeconds != null) {
+    statusDisplay = `Session active — ${formatCountdown(activeSeconds)} left`;
+  }
+
+  const nextDisplay =
+    phase === "pending" && status?.lockedUntil
+      ? `Then blocks until ${formatWhen(status.lockedUntil)}`
+      : phase === "active"
+        ? status?.lockLine
+        : status?.nextLine ||
+          (status?.nextBlockAt
+            ? `Next cutoff ${formatWhen(status.nextBlockAt)}`
+            : status?.scheduleSummary);
+
+  const scheduleReadOnly = scheduleLocked || sessionBusy;
 
   return (
     <>
       <PanelSection title="Status">
         <PanelSectionRow>
-          <div style={{ padding: "4px 0", fontSize: phase === "pending" || phase === "active" ? "1.15em" : undefined }}>
+          <div
+            style={{
+              padding: "6px 0",
+              fontSize: sessionBusy || scheduleLocked ? "1.15em" : undefined,
+              fontWeight: 600,
+            }}
+          >
             {statusDisplay}
           </div>
         </PanelSectionRow>
-        {status?.lockLine && (
+        {nextDisplay && (
           <PanelSectionRow>
-            <div style={{ padding: "4px 0", opacity: 0.85 }}>{status.lockLine}</div>
+            <div style={{ padding: "2px 0", opacity: 0.9 }}>{nextDisplay}</div>
+          </PanelSectionRow>
+        )}
+        {status?.lockLine && phase !== "active" && (
+          <PanelSectionRow>
+            <div style={{ padding: "2px 0", opacity: 0.8 }}>{status.lockLine}</div>
+          </PanelSectionRow>
+        )}
+        {status?.scheduleSummary && (
+          <PanelSectionRow>
+            <div style={{ padding: "2px 0", opacity: 0.75, fontSize: "0.9em" }}>
+              {status.scheduleSummary}
+            </div>
+          </PanelSectionRow>
+        )}
+        {saveNote && (
+          <PanelSectionRow>
+            <div style={{ padding: "4px 0", color: "#8f8" }}>{saveNote}</div>
           </PanelSectionRow>
         )}
         {error && (
@@ -308,8 +378,8 @@ export function Content() {
           </PanelSectionRow>
         )}
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => void refresh()} disabled={busy}>
-            Refresh
+          <ButtonItem layout="below" onClick={() => void refresh()} disabled={busy !== null}>
+            Refresh status
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
@@ -318,8 +388,7 @@ export function Content() {
         <PanelSection title="Upcoming session">
           <PanelSectionRow>
             <div style={{ padding: "4px 0" }}>
-              Countdown only — games are still allowed. The session becomes active when
-              the timer hits zero.
+              Countdown only — games still allowed. Becomes a hard block at zero.
             </div>
           </PanelSectionRow>
           <PanelSectionRow>
@@ -328,23 +397,25 @@ export function Content() {
             </div>
           </PanelSectionRow>
           <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy} onClick={() => void onCancelPending()}>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== null}
+              onClick={() => void onCancelPending()}
+            >
               Cancel upcoming session
             </ButtonItem>
           </PanelSectionRow>
         </PanelSection>
       )}
 
-      {phase === "active" || (locked && phase === "none") ? (
-        <PanelSection title={phase === "active" ? "Session active" : "Locked"}>
+      {phase === "active" && (
+        <PanelSection title="Session active">
           <PanelSectionRow>
             <div style={{ padding: "4px 0" }}>
-              {phase === "active"
-                ? "Games are blocked. Wait for the timer to end; there is no unlock."
-                : "Settings are frozen until the commitment ends. No in-plugin disable."}
+              Games are blocked. Wait for the timer — there is no unlock.
             </div>
           </PanelSectionRow>
-          {phase === "active" && activeSeconds != null && (
+          {activeSeconds != null && (
             <PanelSectionRow>
               <div style={{ padding: "8px 0", fontSize: "1.6em", fontWeight: 600 }}>
                 {formatCountdown(activeSeconds)}
@@ -352,157 +423,195 @@ export function Content() {
             </PanelSectionRow>
           )}
         </PanelSection>
-      ) : phase !== "pending" ? (
-        <>
-          <PanelSection title="Start session">
+      )}
+
+      {phase !== "active" && (
+        <PanelSection title="Daily schedule">
+          <PanelSectionRow>
+            <div style={{ padding: "4px 0", opacity: 0.85 }}>
+              {scheduleLocked
+                ? "Enforcing cutoffs. Settings frozen until the lock ends."
+                : "Save your cutoffs, then lock the schedule to enforce them."}
+            </div>
+          </PanelSectionRow>
+          {status?.nextBlockAt && (
             <PanelSectionRow>
-              <div style={{ padding: "4px 0", opacity: 0.85 }}>
-                Block all games for a period. Start now, or after a countdown
-                (handy for testing — launch a game first).
+              <div style={{ padding: "4px 0", fontWeight: 600 }}>
+                {scheduleLocked ? "Next block: " : "Next block if locked: "}
+                {formatWhen(status.nextBlockAt)}
               </div>
             </PanelSectionRow>
+          )}
+          <PanelSectionRow>
+            <TextField
+              label="Weekday block after (HH:MM)"
+              value={blockAfter}
+              disabled={scheduleReadOnly}
+              onChange={(e) => setBlockAfter(e.target.value)}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <TextField
+              label="Weekend block after (HH:MM)"
+              value={weekendBlockAfter}
+              disabled={scheduleReadOnly}
+              onChange={(e) => setWeekendBlockAfter(e.target.value)}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <TextField
+              label="Warn minutes before cutoff"
+              value={warnMinutes}
+              disabled={scheduleReadOnly}
+              onChange={(e) => setWarnMinutes(e.target.value)}
+            />
+          </PanelSectionRow>
+          {!scheduleReadOnly && (
             <PanelSectionRow>
               <ButtonItem
                 layout="below"
-                disabled={busy}
-                onClick={() => confirmSession(2, 0)}
+                onClick={() => void saveSchedule()}
+                disabled={busy !== null}
               >
-                Now · 2 min (quick test)
+                {busy === "save" ? "Saving…" : "Save schedule"}
               </ButtonItem>
             </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                disabled={busy}
-                onClick={() => confirmSession(5, 0)}
-              >
-                Now · 5 min
-              </ButtonItem>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                disabled={busy}
-                onClick={() => confirmSession(5, 1)}
-              >
-                Countdown 1 min · then 5 min
-              </ButtonItem>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                disabled={busy}
-                onClick={() => confirmSession(15, 0)}
-              >
-                Now · 15 min
-              </ButtonItem>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                disabled={busy}
-                onClick={() => confirmSession(30, 0)}
-              >
-                Now · 30 min
-              </ButtonItem>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <TextField
-                label="Custom duration (minutes)"
-                value={sessionDuration}
-                mustBeNumeric={true}
-                onChange={(e) => setSessionDuration(e.target.value)}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <TextField
-                label="Countdown before start (minutes, 0 = now)"
-                value={sessionDelay}
-                mustBeNumeric={true}
-                onChange={(e) => setSessionDelay(e.target.value)}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem layout="below" disabled={busy} onClick={startCustomSession}>
-                Start custom session
-              </ButtonItem>
-            </PanelSectionRow>
-          </PanelSection>
+          )}
+          <PanelSectionRow>
+            <ToggleField
+              label="Lock schedule"
+              description={
+                scheduleLocked && status?.lockedUntil
+                  ? `On — frozen until ${formatWhen(status.lockedUntil)}. Cannot turn off early.`
+                  : "Off — cutoffs are saved but not enforced until you lock."
+              }
+              checked={scheduleLocked}
+              disabled={busy !== null || phase === "pending"}
+              onChange={(value: boolean) => onLockToggle(value)}
+            />
+          </PanelSectionRow>
+          {!scheduleLocked && phase !== "pending" && (
+            <>
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  disabled={busy !== null}
+                  onClick={() => enableScheduleLock("tomorrow_8", "tomorrow 08:00")}
+                >
+                  Lock until tomorrow 08:00
+                </ButtonItem>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  disabled={busy !== null}
+                  onClick={() => enableScheduleLock("days_3", "3 days from now")}
+                >
+                  Lock for 3 days
+                </ButtonItem>
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  disabled={busy !== null}
+                  onClick={() => enableScheduleLock("days_7", "7 days from now")}
+                >
+                  Lock for 7 days
+                </ButtonItem>
+              </PanelSectionRow>
+            </>
+          )}
+        </PanelSection>
+      )}
 
-          <PanelSection title="Daily schedule">
-            <PanelSectionRow>
-              <TextField
-                label="Weekday block after (HH:MM)"
-                value={blockAfter}
-                onChange={(e) => setBlockAfter(e.target.value)}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <TextField
-                label="Weekend block after (HH:MM)"
-                value={weekendBlockAfter}
-                onChange={(e) => setWeekendBlockAfter(e.target.value)}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <TextField
-                label="Warn minutes before cutoff"
-                value={warnMinutes}
-                onChange={(e) => setWarnMinutes(e.target.value)}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => void saveSchedule()} disabled={busy}>
-                Save schedule
-              </ButtonItem>
-            </PanelSectionRow>
-          </PanelSection>
-
-          <PanelSection title="Lock schedule (long)">
-            <PanelSectionRow>
-              <div style={{ padding: "4px 0", opacity: 0.85 }}>
-                Freeze settings and enforce the daily schedule until the commitment ends.
-              </div>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                disabled={busy}
-                onClick={() => confirmLock("tomorrow_8", "tomorrow 08:00")}
-              >
-                Lock until tomorrow 08:00
-              </ButtonItem>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                disabled={busy}
-                onClick={() => confirmLock("days_3", "3 days from now")}
-              >
-                Lock for 3 days
-              </ButtonItem>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                disabled={busy}
-                onClick={() => confirmLock("days_7", "7 days from now")}
-              >
-                Lock for 7 days
-              </ButtonItem>
-            </PanelSectionRow>
-          </PanelSection>
-        </>
-      ) : null}
+      {phase === "none" && !scheduleLocked && (
+        <PanelSection title="Timed session">
+          <PanelSectionRow>
+            <div style={{ padding: "4px 0", opacity: 0.85 }}>
+              Block all games for a set period (separate from the daily schedule).
+            </div>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== null}
+              onClick={() => confirmSession(2, 0)}
+            >
+              Now · 2 min
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== null}
+              onClick={() => confirmSession(5, 0)}
+            >
+              Now · 5 min
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== null}
+              onClick={() => confirmSession(5, 1)}
+            >
+              Countdown 1 min · then 5 min
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== null}
+              onClick={() => confirmSession(15, 0)}
+            >
+              Now · 15 min
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== null}
+              onClick={() => confirmSession(30, 0)}
+            >
+              Now · 30 min
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <TextField
+              label="Custom duration (minutes)"
+              value={sessionDuration}
+              mustBeNumeric={true}
+              onChange={(e) => setSessionDuration(e.target.value)}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <TextField
+              label="Countdown before start (minutes, 0 = now)"
+              value={sessionDelay}
+              mustBeNumeric={true}
+              onChange={(e) => setSessionDelay(e.target.value)}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy !== null}
+              onClick={startCustomSession}
+            >
+              Start custom session
+            </ButtonItem>
+          </PanelSectionRow>
+        </PanelSection>
+      )}
 
       <PanelSection title="Updates">
         <PanelSectionRow>
           <div style={{ padding: "4px 0" }}>
             Installed v{version}
-            {updateInfo?.latest && updateInfo.updateAvailable
+            {updateInfo?.updateAvailable && updateInfo.latest
               ? ` · latest v${updateInfo.latest}`
               : updateInfo?.latest
-                ? ` · up to date`
+                ? " · up to date"
                 : ""}
           </div>
         </PanelSectionRow>
@@ -513,25 +622,29 @@ export function Content() {
             </div>
           </PanelSectionRow>
         )}
-        {!locked && phase !== "active" && (
+        {!scheduleLocked && phase !== "active" && (
           <PanelSectionRow>
             <ToggleField
               label="Auto-update"
               description="Check GitHub Releases every few hours and install when unlocked."
               checked={autoUpdate}
-              disabled={busy}
+              disabled={busy !== null}
               onChange={(value: boolean) => void onToggleAutoUpdate(value)}
             />
           </PanelSectionRow>
         )}
         <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy} onClick={() => void onCheckUpdate()}>
+          <ButtonItem
+            layout="below"
+            disabled={busy !== null}
+            onClick={() => void onCheckUpdate()}
+          >
             Check for updates
           </ButtonItem>
         </PanelSectionRow>
-        {updateInfo?.updateAvailable && !locked && phase !== "active" && (
+        {updateInfo?.updateAvailable && !scheduleLocked && phase !== "active" && (
           <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy} onClick={onInstallUpdate}>
+            <ButtonItem layout="below" disabled={busy !== null} onClick={onInstallUpdate}>
               Install v{updateInfo.latest}
             </ButtonItem>
           </PanelSectionRow>
@@ -541,8 +654,8 @@ export function Content() {
       <PanelSection title="About">
         <PanelSectionRow>
           <div style={{ padding: "4px 0", opacity: 0.75, fontSize: "0.9em" }}>
-            Sessions hard-quit games for a set period. Escape hatches outside this plugin
-            still exist (uninstall / Desktop Mode).
+            Deck Curfew v{PLUGIN_VERSION}. Escape hatches outside this plugin still exist
+            (uninstall / Desktop Mode).
           </div>
         </PanelSectionRow>
       </PanelSection>

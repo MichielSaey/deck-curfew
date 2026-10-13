@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- Clearer live status (session countdown, schedule locked/unlocked, next block time)
+- Schedule save feedback; lock is a toggle on the daily schedule (not mixed into sessions)
+- Fix early status/version blank when backend was still starting
+- Frontend always shows installed version number
+
 ## 0.3.0
 
 - Auto-update from GitHub Releases (check + install; optional background install when unlocked)

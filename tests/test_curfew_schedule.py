@@ -99,8 +99,9 @@ class SessionTests(unittest.TestCase):
         self.assertFalse(payload["sessionActive"])
         self.assertFalse(payload["shouldBlockPlay"])
         self.assertEqual(payload["countdownSeconds"], 120)
-        self.assertIn("Countdown", payload["statusLine"])
-        self.assertIn("not active", payload["statusLine"])
+        self.assertIn("Session starts in", payload["statusLine"])
+        self.assertTrue(payload.get("nextBlockAt") or payload.get("nextLine"))
+        self.assertFalse(payload["scheduleLocked"])
 
     def test_active_blocks_play(self):
         now = datetime(2026, 10, 13, 14, 0, 0)

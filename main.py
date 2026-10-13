@@ -78,19 +78,28 @@ def _init_settings():
 settings = _init_settings()
 
 
+def _default_update_info() -> dict[str, Any]:
+    return {
+        "current": read_installed_version(PLUGIN_DIR),
+        "latest": None,
+        "updateAvailable": False,
+        "downloadUrl": None,
+        "releaseUrl": None,
+        "error": None,
+        "lastChecked": None,
+        "needsReload": False,
+    }
+
+
 class Plugin:
+    # Initialized before _main so early get_status calls never AttributeError.
+    _update_info: dict[str, Any] = _default_update_info()
+    _enforce_task: Optional[asyncio.Task] = None
+    _update_task: Optional[asyncio.Task] = None
+
     async def _main(self):
         decky.logger.info("Deck Curfew backend starting")
-        self._update_info: dict[str, Any] = {
-            "current": read_installed_version(PLUGIN_DIR),
-            "latest": None,
-            "updateAvailable": False,
-            "downloadUrl": None,
-            "releaseUrl": None,
-            "error": None,
-            "lastChecked": None,
-            "needsReload": False,
-        }
+        self._update_info = _default_update_info()
         self._ensure_defaults()
         self._enforce_task = asyncio.create_task(self._enforce_loop())
         self._update_task = asyncio.create_task(self._update_loop())
@@ -221,13 +230,47 @@ class Plugin:
         return normalized
 
     def _status(self) -> dict[str, Any]:
+        version = read_installed_version(PLUGIN_DIR)
         status = status_payload(self._load(), datetime.now())
-        status["pluginVersion"] = read_installed_version(PLUGIN_DIR)
-        status["update"] = self._update_info
+        status["pluginVersion"] = version
+        update = getattr(self, "_update_info", None) or _default_update_info()
+        if not update.get("current"):
+            update = {**update, "current": version}
+        status["update"] = update
         return status
 
     async def get_status(self) -> dict[str, Any]:
-        return self._status()
+        try:
+            return self._status()
+        except Exception as exc:
+            decky.logger.error("get_status failed: %s", exc)
+            version = read_installed_version(PLUGIN_DIR)
+            return {
+                "now": datetime.now().isoformat(timespec="seconds"),
+                "locked": False,
+                "lockedUntil": None,
+                "sessionStartsAt": None,
+                "sessionPhase": "none",
+                "sessionActive": False,
+                "scheduleLocked": False,
+                "playAllowed": True,
+                "shouldBlockPlay": False,
+                "blockAction": "terminate",
+                "warnMinutes": 5,
+                "minutesToCutoff": None,
+                "countdownSeconds": None,
+                "shouldWarn": False,
+                "cutoffAt": None,
+                "allowAt": None,
+                "nextBlockAt": None,
+                "scheduleSummary": None,
+                "statusLine": f"Status error: {exc}",
+                "nextLine": None,
+                "lockLine": None,
+                "pluginVersion": version,
+                "update": getattr(self, "_update_info", None) or _default_update_info(),
+                "settings": normalize_settings(None),
+            }
 
     async def get_settings(self) -> dict[str, Any]:
         return self._load()
