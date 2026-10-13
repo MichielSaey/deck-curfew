@@ -1,14 +1,16 @@
 import os
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "py_modules"))
 from curfew_schedule import (
+    build_session,
     default_settings,
     is_locked,
     is_play_allowed,
     next_cutoff,
+    session_phase,
     status_payload,
 )
 
@@ -71,6 +73,47 @@ class ScheduleTests(unittest.TestCase):
         self.assertTrue(payload["shouldWarn"])
         self.assertTrue(payload["playAllowed"])
         self.assertTrue(payload["locked"])
+
+
+class SessionTests(unittest.TestCase):
+    def test_build_session_now(self):
+        now = datetime(2026, 10, 13, 14, 0, 0)
+        session = build_session(now, duration_minutes=5, delay_minutes=0)
+        self.assertEqual(session["sessionStartsAt"], "2026-10-13T14:00:00")
+        self.assertEqual(session["lockedUntil"], "2026-10-13T14:05:00")
+
+    def test_build_session_delayed(self):
+        now = datetime(2026, 10, 13, 14, 0, 0)
+        session = build_session(now, duration_minutes=5, delay_minutes=1)
+        self.assertEqual(session["sessionStartsAt"], "2026-10-13T14:01:00")
+        self.assertEqual(session["lockedUntil"], "2026-10-13T14:06:00")
+
+    def test_pending_allows_play(self):
+        now = datetime(2026, 10, 13, 14, 0, 0)
+        cfg = default_settings()
+        cfg.update(build_session(now, 5, delay_minutes=2))
+        self.assertEqual(session_phase(cfg, now), "pending")
+        self.assertTrue(is_locked(cfg, now))
+        self.assertTrue(is_play_allowed(cfg, now))
+
+    def test_active_blocks_play(self):
+        now = datetime(2026, 10, 13, 14, 0, 0)
+        cfg = default_settings()
+        cfg.update(build_session(now - timedelta(minutes=1), 5, delay_minutes=0))
+        # Session started 1 min ago, ends in 4 min
+        self.assertEqual(session_phase(cfg, now), "active")
+        self.assertFalse(is_play_allowed(cfg, now))
+        payload = status_payload(cfg, now)
+        self.assertTrue(payload["shouldBlockPlay"])
+        self.assertEqual(payload["sessionPhase"], "active")
+
+    def test_expired_session_clears_via_is_locked(self):
+        now = datetime(2026, 10, 13, 15, 0, 0)
+        cfg = default_settings()
+        cfg["sessionStartsAt"] = "2026-10-13T14:00:00"
+        cfg["lockedUntil"] = "2026-10-13T14:05:00"
+        self.assertFalse(is_locked(cfg, now))
+        self.assertTrue(is_play_allowed(cfg, now))
 
 
 if __name__ == "__main__":

@@ -5,8 +5,11 @@ export type TimeWindow = {
   end: string;
 };
 
+export type SessionPhase = "none" | "pending" | "active";
+
 export type CurfewSettings = {
   lockedUntil: string | null;
+  sessionStartsAt: string | null;
   timezone: string;
   mode: "block_after" | "allow_windows";
   warnMinutes: number;
@@ -20,6 +23,8 @@ export type CurfewStatus = {
   now: string;
   locked: boolean;
   lockedUntil: string | null;
+  sessionStartsAt: string | null;
+  sessionPhase: SessionPhase;
   playAllowed: boolean;
   shouldBlockPlay: boolean;
   blockAction: "terminate";

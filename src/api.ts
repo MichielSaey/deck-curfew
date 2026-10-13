@@ -7,3 +7,7 @@ export const updateSchedule = callable<[patch: Record<string, unknown>], CurfewS
 );
 export const lockCurfew = callable<[untilIso: string], CurfewStatus>("lock_curfew");
 export const lockPreset = callable<[preset: string], CurfewStatus>("lock_preset");
+export const startSession = callable<
+  [durationMinutes: number, delayMinutes?: number],
+  CurfewStatus
+>("start_session");

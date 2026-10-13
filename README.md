@@ -8,12 +8,12 @@ Outside your play window, running games are **hard-quit** and new launches are b
 
 ## Features
 
-- Weekday / weekend “block after” times (24h `HH:MM`)
-- Freedom-style lock presets: until tomorrow 08:00, 3 days, or 7 days
-- Warning toast before cutoff
+- **Freedom-style sessions:** block all games for a period — start now, or after a delay (great for testing)
+- Weekday / weekend “block after” schedule + long schedule locks
+- Warning toast before session/cutoff
 - Hard quit via Steam `TerminateApp`
 - Launch block via `RunGame` patch
-- No in-plugin unlock while locked (wait for commitment end)
+- No in-plugin cancel/unlock while a session or lock is active (wait for commitment end)
 
 ## Honest limits
 

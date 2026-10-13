@@ -8,7 +8,7 @@ import decky
 # Bundled pure schedule helpers
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "py_modules"))
 from curfew_schedule import (  # noqa: E402
-    default_settings,
+    build_session,
     is_locked,
     normalize_settings,
     parse_hhmm,
@@ -86,12 +86,15 @@ class Plugin:
     def _ensure_defaults(self) -> dict[str, Any]:
         raw = settings.getSetting(SETTINGS_KEY, None)
         normalized = normalize_settings(raw)
-        # Drop expired locks
+        # Drop expired locks / sessions
         now = datetime.now()
         if normalized.get("lockedUntil") and not is_locked(normalized, now):
             normalized["lockedUntil"] = None
+            normalized["sessionStartsAt"] = None
         if raw != normalized:
             settings.setSetting(SETTINGS_KEY, normalized)
+            if hasattr(settings, "commit"):
+                settings.commit()
         return normalized
 
     def _load(self) -> dict[str, Any]:
@@ -159,6 +162,7 @@ class Plugin:
             raise Exception("Lock commitment cannot exceed 365 days.")
 
         cfg["lockedUntil"] = until.replace(microsecond=0).isoformat()
+        cfg["sessionStartsAt"] = None  # schedule lock, not a timed session
         cfg["blockAction"] = "terminate"
         saved = self._save(cfg)
         decky.logger.info("Curfew locked until %s", cfg["lockedUntil"])
@@ -177,3 +181,32 @@ class Plugin:
         else:
             raise Exception(f"Unknown lock preset: {preset}")
         return await self.lock_curfew(until.isoformat())
+
+    async def start_session(self, duration_minutes: int, delay_minutes: int = 0) -> dict[str, Any]:
+        """
+        Freedom-style session: block all games for `duration_minutes`,
+        optionally starting after `delay_minutes` (play still allowed during delay).
+        Settings stay frozen until the session ends — no cancel.
+        """
+        cfg = self._load()
+        now = datetime.now()
+        if is_locked(cfg, now):
+            raise Exception("Already locked — wait for the current session/commitment to end.")
+
+        try:
+            duration_minutes = int(duration_minutes)
+            delay_minutes = int(delay_minutes)
+            session = build_session(now, duration_minutes, delay_minutes)
+        except (TypeError, ValueError) as exc:
+            raise Exception(str(exc)) from exc
+
+        cfg["sessionStartsAt"] = session["sessionStartsAt"]
+        cfg["lockedUntil"] = session["lockedUntil"]
+        cfg["blockAction"] = "terminate"
+        saved = self._save(cfg)
+        decky.logger.info(
+            "Session armed: start=%s end=%s",
+            cfg["sessionStartsAt"],
+            cfg["lockedUntil"],
+        )
+        return status_payload(saved, now)

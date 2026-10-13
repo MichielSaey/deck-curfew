@@ -11,6 +11,9 @@ DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 def default_settings() -> dict[str, Any]:
     return {
         "lockedUntil": None,
+        # Freedom-style session: block all play between sessionStartsAt and lockedUntil.
+        # If sessionStartsAt is null while locked, enforce the daily schedule instead.
+        "sessionStartsAt": None,
         "timezone": "local",
         "mode": "block_after",
         "warnMinutes": 5,
@@ -68,18 +71,44 @@ def normalize_settings(raw: Optional[dict[str, Any]]) -> dict[str, Any]:
     merged["blockAction"] = "terminate"
     if merged.get("mode") not in ("block_after", "allow_windows"):
         merged["mode"] = "block_after"
+    for key in ("lockedUntil", "sessionStartsAt"):
+        if merged.get(key) == "":
+            merged[key] = None
     return merged
 
 
-def is_locked(settings: dict[str, Any], now: datetime) -> bool:
-    locked_until = settings.get("lockedUntil")
-    if not locked_until:
-        return False
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
     try:
-        end = datetime.fromisoformat(locked_until)
+        return datetime.fromisoformat(value)
     except ValueError:
+        return None
+
+
+def is_locked(settings: dict[str, Any], now: datetime) -> bool:
+    end = _parse_iso(settings.get("lockedUntil"))
+    if end is None:
         return False
     return now < end
+
+
+def is_session_lock(settings: dict[str, Any]) -> bool:
+    """True when lockedUntil is paired with a session start (Freedom session)."""
+    return bool(settings.get("sessionStartsAt") and settings.get("lockedUntil"))
+
+
+def session_phase(settings: dict[str, Any], now: datetime) -> str:
+    """none | pending | active — for Freedom sessions only."""
+    if not is_session_lock(settings):
+        return "none"
+    start = _parse_iso(settings.get("sessionStartsAt"))
+    end = _parse_iso(settings.get("lockedUntil"))
+    if start is None or end is None or now >= end:
+        return "none"
+    if now < start:
+        return "pending"
+    return "active"
 
 
 def effective_block_after(settings: dict[str, Any], now: datetime) -> str:
@@ -98,6 +127,14 @@ def is_play_allowed(settings: dict[str, Any], now: datetime) -> bool:
     """Play is only restricted while locked. Unlocked = always allowed."""
     if not is_locked(settings, now):
         return True
+
+    phase = session_phase(settings, now)
+    if phase == "pending":
+        # Session armed but not started — still allowed to play (good for testing).
+        return True
+    if phase == "active":
+        # Freedom session: block everything until the session ends.
+        return False
 
     mode = settings.get("mode", "block_after")
     current = now.hour * 60 + now.minute
@@ -129,6 +166,12 @@ def is_play_allowed(settings: dict[str, Any], now: datetime) -> bool:
 def next_cutoff(settings: dict[str, Any], now: datetime) -> Optional[datetime]:
     """Next moment play becomes disallowed (while locked)."""
     if not is_locked(settings, now):
+        return None
+
+    phase = session_phase(settings, now)
+    if phase == "pending":
+        return _parse_iso(settings.get("sessionStartsAt"))
+    if phase == "active":
         return None
 
     mode = settings.get("mode", "block_after")
@@ -167,6 +210,9 @@ def next_allow(settings: dict[str, Any], now: datetime) -> Optional[datetime]:
     if not is_locked(settings, now) or is_play_allowed(settings, now):
         return None
 
+    if session_phase(settings, now) == "active":
+        return _parse_iso(settings.get("lockedUntil"))
+
     mode = settings.get("mode", "block_after")
     if mode == "block_after":
         tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -185,10 +231,30 @@ def next_allow(settings: dict[str, Any], now: datetime) -> Optional[datetime]:
     return None
 
 
+def build_session(now: datetime, duration_minutes: int, delay_minutes: int = 0) -> dict[str, str]:
+    """Return sessionStartsAt / lockedUntil for a Freedom-style session."""
+    if duration_minutes < 1:
+        raise ValueError("Session duration must be at least 1 minute")
+    if duration_minutes > 24 * 60:
+        raise ValueError("Session duration cannot exceed 24 hours")
+    if delay_minutes < 0:
+        raise ValueError("Delay cannot be negative")
+    if delay_minutes > 24 * 60:
+        raise ValueError("Delay cannot exceed 24 hours")
+
+    start = (now + timedelta(minutes=delay_minutes)).replace(microsecond=0)
+    end = (start + timedelta(minutes=duration_minutes)).replace(microsecond=0)
+    return {
+        "sessionStartsAt": start.isoformat(),
+        "lockedUntil": end.isoformat(),
+    }
+
+
 def status_payload(settings: dict[str, Any], now: Optional[datetime] = None) -> dict[str, Any]:
     now = now or datetime.now()
     settings = normalize_settings(settings)
     locked = is_locked(settings, now)
+    phase = session_phase(settings, now)
     play_allowed = is_play_allowed(settings, now)
     cutoff = next_cutoff(settings, now) if locked and play_allowed else None
     allow_at = next_allow(settings, now) if locked and not play_allowed else None
@@ -199,10 +265,18 @@ def status_payload(settings: dict[str, Any], now: Optional[datetime] = None) -> 
     if cutoff is not None:
         delta = cutoff - now
         minutes_to_cutoff = max(0, int(delta.total_seconds() // 60))
-        should_warn = 0 < delta.total_seconds() <= warn_minutes * 60
+        # For pending sessions, always warn in the last minute if warnMinutes is 0+
+        should_warn = 0 < delta.total_seconds() <= max(warn_minutes, 1) * 60
 
     if not locked:
-        status_line = "Unlocked — curfew not enforcing"
+        status_line = "Unlocked — no active session"
+    elif phase == "pending" and cutoff is not None:
+        mins = max(1, int((cutoff - now).total_seconds() // 60))
+        status_line = f"Session starts in ~{mins} min — play still allowed"
+    elif phase == "active" and allow_at is not None:
+        status_line = f"Session active — blocked until {allow_at.strftime('%H:%M')}"
+    elif phase == "active":
+        status_line = "Session active — games blocked"
     elif play_allowed and cutoff is not None:
         status_line = f"Play allowed until {cutoff.strftime('%H:%M')}"
     elif play_allowed:
@@ -215,12 +289,17 @@ def status_payload(settings: dict[str, Any], now: Optional[datetime] = None) -> 
     lock_line = None
     if locked and settings.get("lockedUntil"):
         end = datetime.fromisoformat(settings["lockedUntil"])
-        lock_line = f"Settings locked until {end.strftime('%a %Y-%m-%d %H:%M')}"
+        if phase in ("pending", "active"):
+            lock_line = f"Session locked until {end.strftime('%H:%M')} (no cancel)"
+        else:
+            lock_line = f"Settings locked until {end.strftime('%a %Y-%m-%d %H:%M')}"
 
     return {
         "now": now.isoformat(timespec="seconds"),
         "locked": locked,
         "lockedUntil": settings.get("lockedUntil"),
+        "sessionStartsAt": settings.get("sessionStartsAt"),
+        "sessionPhase": phase,
         "playAllowed": play_allowed,
         "shouldBlockPlay": locked and not play_allowed,
         "blockAction": "terminate",
