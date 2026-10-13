@@ -11,3 +11,4 @@ export const startSession = callable<
   [durationMinutes: number, delayMinutes?: number],
   CurfewStatus
 >("start_session");
+export const cancelPendingSession = callable<[], CurfewStatus>("cancel_pending_session");

@@ -8,7 +8,7 @@ import {
 } from "@decky/ui";
 import { toaster } from "@decky/api";
 import { useCallback, useEffect, useState } from "react";
-import { getStatus, lockPreset, startSession, updateSchedule } from "./api";
+import { cancelPendingSession, getStatus, lockPreset, startSession, updateSchedule } from "./api";
 import { applyStatus } from "./enforce";
 import type { CurfewStatus } from "./types";
 
@@ -23,6 +23,24 @@ function formatDuration(mins: number): string {
   return m ? `${h}h ${m}m` : `${h}h`;
 }
 
+function formatCountdown(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(s / 3600);
+  const minutes = Math.floor((s % 3600) / 60);
+  const seconds = s % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function secondsUntil(iso: string | null | undefined, nowMs: number): number | null {
+  if (!iso) return null;
+  const target = Date.parse(iso);
+  if (Number.isNaN(target)) return null;
+  return Math.max(0, Math.floor((target - nowMs) / 1000));
+}
+
 export function Content() {
   const [status, setStatus] = useState<CurfewStatus | null>(null);
   const [blockAfter, setBlockAfter] = useState("21:00");
@@ -32,6 +50,7 @@ export function Content() {
   const [sessionDelay, setSessionDelay] = useState("0");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const refresh = useCallback(async () => {
     try {
@@ -42,6 +61,7 @@ export function Content() {
       setWarnMinutes(String(next.settings.warnMinutes));
       setError(null);
       applyStatus(next);
+      setNowMs(Date.now());
     } catch (err) {
       console.error(err);
       setError(err instanceof Error ? err.message : String(err));
@@ -50,9 +70,15 @@ export function Content() {
 
   useEffect(() => {
     void refresh();
-    const id = setInterval(() => void refresh(), 10000);
+    const id = setInterval(() => void refresh(), 5000);
     return () => clearInterval(id);
   }, [refresh]);
+
+  // Local 1s tick for smooth countdown between backend polls
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const saveSchedule = async () => {
     if (!isHhMm(blockAfter) || !isHhMm(weekendBlockAfter)) {
@@ -87,12 +113,16 @@ export function Content() {
     const when =
       delay <= 0
         ? `now for ${formatDuration(duration)}`
-        : `in ${formatDuration(delay)}, then block for ${formatDuration(duration)}`;
+        : `after a ${formatDuration(delay)} countdown, then for ${formatDuration(duration)}`;
     showModal(
       <ConfirmModal
-        strTitle="Start curfew session?"
-        strDescription={`Games will be blocked ${when}. You cannot cancel once started.`}
-        strOKButtonText="Start session"
+        strTitle={delay > 0 ? "Arm curfew session?" : "Start curfew session?"}
+        strDescription={
+          delay > 0
+            ? `A countdown will run first — the session is not active yet. Then games will be blocked ${when}. Once active, you cannot cancel.`
+            : `Games will be blocked ${when}. You cannot cancel once started.`
+        }
+        strOKButtonText={delay > 0 ? "Arm session" : "Start session"}
         onOK={async () => {
           setBusy(true);
           try {
@@ -102,7 +132,10 @@ export function Content() {
             setError(null);
             toaster.toast({
               title: "Deck Curfew",
-              body: delay > 0 ? `Session armed — starts in ${formatDuration(delay)}.` : "Session started.",
+              body:
+                delay > 0
+                  ? `Countdown started — session activates in ${formatDuration(delay)}.`
+                  : "Session started.",
             });
           } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
@@ -152,15 +185,42 @@ export function Content() {
     );
   };
 
+  const onCancelPending = async () => {
+    setBusy(true);
+    try {
+      const next = await cancelPendingSession();
+      setStatus(next);
+      applyStatus(next);
+      setError(null);
+      toaster.toast({ title: "Deck Curfew", body: "Upcoming session cancelled." });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const locked = status?.locked ?? false;
   const phase = status?.sessionPhase ?? "none";
+
+  const pendingSeconds =
+    phase === "pending" ? secondsUntil(status?.sessionStartsAt, nowMs) : null;
+  const activeSeconds =
+    phase === "active" ? secondsUntil(status?.lockedUntil, nowMs) : null;
+
+  const statusDisplay =
+    phase === "pending" && pendingSeconds != null
+      ? `Countdown ${formatCountdown(pendingSeconds)} — session not active yet`
+      : phase === "active" && activeSeconds != null
+        ? `Session active — ${formatCountdown(activeSeconds)} left`
+        : (status?.statusLine ?? "Loading…");
 
   return (
     <>
       <PanelSection title="Status">
         <PanelSectionRow>
-          <div style={{ padding: "4px 0" }}>
-            {status?.statusLine ?? "Loading…"}
+          <div style={{ padding: "4px 0", fontSize: phase === "pending" || phase === "active" ? "1.15em" : undefined }}>
+            {statusDisplay}
           </div>
         </PanelSectionRow>
         {status?.lockLine && (
@@ -180,24 +240,50 @@ export function Content() {
         </PanelSectionRow>
       </PanelSection>
 
-      {locked ? (
-        <PanelSection title={phase === "none" ? "Locked" : "Session locked"}>
+      {phase === "pending" && (
+        <PanelSection title="Upcoming session">
           <PanelSectionRow>
             <div style={{ padding: "4px 0" }}>
-              {phase === "pending"
-                ? "Session is armed. Play is still allowed until it starts. You cannot cancel."
-                : phase === "active"
-                  ? "Session is active — games are blocked. Wait for it to end; there is no unlock."
-                  : "Settings are frozen until the commitment ends. No in-plugin disable."}
+              Countdown only — games are still allowed. The session becomes active when
+              the timer hits zero.
             </div>
           </PanelSectionRow>
+          <PanelSectionRow>
+            <div style={{ padding: "8px 0", fontSize: "1.6em", fontWeight: 600 }}>
+              {pendingSeconds != null ? formatCountdown(pendingSeconds) : "—"}
+            </div>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={busy} onClick={() => void onCancelPending()}>
+              Cancel upcoming session
+            </ButtonItem>
+          </PanelSectionRow>
         </PanelSection>
-      ) : (
+      )}
+
+      {phase === "active" || (locked && phase === "none") ? (
+        <PanelSection title={phase === "active" ? "Session active" : "Locked"}>
+          <PanelSectionRow>
+            <div style={{ padding: "4px 0" }}>
+              {phase === "active"
+                ? "Games are blocked. Wait for the timer to end; there is no unlock."
+                : "Settings are frozen until the commitment ends. No in-plugin disable."}
+            </div>
+          </PanelSectionRow>
+          {phase === "active" && activeSeconds != null && (
+            <PanelSectionRow>
+              <div style={{ padding: "8px 0", fontSize: "1.6em", fontWeight: 600 }}>
+                {formatCountdown(activeSeconds)}
+              </div>
+            </PanelSectionRow>
+          )}
+        </PanelSection>
+      ) : phase !== "pending" ? (
         <>
           <PanelSection title="Start session">
             <PanelSectionRow>
               <div style={{ padding: "4px 0", opacity: 0.85 }}>
-                Block all games for a period. Start now, or after a delay
+                Block all games for a period. Start now, or after a countdown
                 (handy for testing — launch a game first).
               </div>
             </PanelSectionRow>
@@ -225,7 +311,7 @@ export function Content() {
                 disabled={busy}
                 onClick={() => confirmSession(5, 1)}
               >
-                In 1 min · then 5 min
+                Countdown 1 min · then 5 min
               </ButtonItem>
             </PanelSectionRow>
             <PanelSectionRow>
@@ -256,7 +342,7 @@ export function Content() {
             </PanelSectionRow>
             <PanelSectionRow>
               <TextField
-                label="Start after (minutes, 0 = now)"
+                label="Countdown before start (minutes, 0 = now)"
                 value={sessionDelay}
                 mustBeNumeric={true}
                 onChange={(e) => setSessionDelay(e.target.value)}
@@ -333,7 +419,7 @@ export function Content() {
             </PanelSectionRow>
           </PanelSection>
         </>
-      )}
+      ) : null}
 
       <PanelSection title="About">
         <PanelSectionRow>

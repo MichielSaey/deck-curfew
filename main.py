@@ -9,9 +9,11 @@ import decky
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "py_modules"))
 from curfew_schedule import (  # noqa: E402
     build_session,
+    clear_expired_session_fields,
     is_locked,
     normalize_settings,
     parse_hhmm,
+    session_phase,
     status_payload,
 )
 
@@ -86,15 +88,14 @@ class Plugin:
     def _ensure_defaults(self) -> dict[str, Any]:
         raw = settings.getSetting(SETTINGS_KEY, None)
         normalized = normalize_settings(raw)
-        # Drop expired locks / sessions
         now = datetime.now()
-        if normalized.get("lockedUntil") and not is_locked(normalized, now):
-            normalized["lockedUntil"] = None
-            normalized["sessionStartsAt"] = None
-        if raw != normalized:
-            settings.setSetting(SETTINGS_KEY, normalized)
+        # Only drop fields after the end time — keep pending countdowns
+        cleaned = clear_expired_session_fields(normalized, now)
+        if cleaned != normalized or raw != cleaned:
+            settings.setSetting(SETTINGS_KEY, cleaned)
             if hasattr(settings, "commit"):
                 settings.commit()
+            return cleaned
         return normalized
 
     def _load(self) -> dict[str, Any]:
@@ -185,12 +186,14 @@ class Plugin:
     async def start_session(self, duration_minutes: int, delay_minutes: int = 0) -> dict[str, Any]:
         """
         Timed session: block all games for `duration_minutes`,
-        optionally starting after `delay_minutes` (play still allowed during delay).
-        Settings stay frozen until the session ends — no cancel.
+        optionally starting after `delay_minutes` (countdown only until then).
+        Once active, settings stay frozen until the session ends — no cancel.
+        A pending countdown can be replaced or cancelled.
         """
         cfg = self._load()
         now = datetime.now()
-        if is_locked(cfg, now):
+        phase = session_phase(cfg, now)
+        if phase == "active" or (is_locked(cfg, now) and phase == "none"):
             raise Exception("Already locked — wait for the current session/commitment to end.")
 
         try:
@@ -209,4 +212,20 @@ class Plugin:
             cfg["sessionStartsAt"],
             cfg["lockedUntil"],
         )
+        return status_payload(saved, now)
+
+    async def cancel_pending_session(self) -> dict[str, Any]:
+        """Cancel a future countdown. Refuses if the session has already become active."""
+        cfg = self._load()
+        now = datetime.now()
+        phase = session_phase(cfg, now)
+        if phase == "active":
+            raise Exception("Session is already active — it cannot be cancelled.")
+        if phase != "pending":
+            raise Exception("No upcoming session to cancel.")
+
+        cfg["sessionStartsAt"] = None
+        cfg["lockedUntil"] = None
+        saved = self._save(cfg)
+        decky.logger.info("Pending session cancelled")
         return status_payload(saved, now)

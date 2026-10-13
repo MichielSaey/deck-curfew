@@ -88,13 +88,19 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(session["sessionStartsAt"], "2026-10-13T14:01:00")
         self.assertEqual(session["lockedUntil"], "2026-10-13T14:06:00")
 
-    def test_pending_allows_play(self):
+    def test_pending_is_countdown_not_active(self):
         now = datetime(2026, 10, 13, 14, 0, 0)
         cfg = default_settings()
         cfg.update(build_session(now, 5, delay_minutes=2))
         self.assertEqual(session_phase(cfg, now), "pending")
-        self.assertTrue(is_locked(cfg, now))
+        self.assertFalse(is_locked(cfg, now))
         self.assertTrue(is_play_allowed(cfg, now))
+        payload = status_payload(cfg, now)
+        self.assertFalse(payload["sessionActive"])
+        self.assertFalse(payload["shouldBlockPlay"])
+        self.assertEqual(payload["countdownSeconds"], 120)
+        self.assertIn("Countdown", payload["statusLine"])
+        self.assertIn("not active", payload["statusLine"])
 
     def test_active_blocks_play(self):
         now = datetime(2026, 10, 13, 14, 0, 0)
@@ -102,10 +108,13 @@ class SessionTests(unittest.TestCase):
         cfg.update(build_session(now - timedelta(minutes=1), 5, delay_minutes=0))
         # Session started 1 min ago, ends in 4 min
         self.assertEqual(session_phase(cfg, now), "active")
+        self.assertTrue(is_locked(cfg, now))
         self.assertFalse(is_play_allowed(cfg, now))
         payload = status_payload(cfg, now)
+        self.assertTrue(payload["sessionActive"])
         self.assertTrue(payload["shouldBlockPlay"])
         self.assertEqual(payload["sessionPhase"], "active")
+        self.assertEqual(payload["countdownSeconds"], 4 * 60)
 
     def test_expired_session_clears_via_is_locked(self):
         now = datetime(2026, 10, 13, 15, 0, 0)

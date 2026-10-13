@@ -25,11 +25,13 @@ export type CurfewStatus = {
   lockedUntil: string | null;
   sessionStartsAt: string | null;
   sessionPhase: SessionPhase;
+  sessionActive: boolean;
   playAllowed: boolean;
   shouldBlockPlay: boolean;
   blockAction: "terminate";
   warnMinutes: number;
   minutesToCutoff: number | null;
+  countdownSeconds: number | null;
   shouldWarn: boolean;
   cutoffAt: string | null;
   allowAt: string | null;

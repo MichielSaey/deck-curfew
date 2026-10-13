@@ -57,7 +57,7 @@ function maybeWarn(status: CurfewStatus): void {
   const mins = status.minutesToCutoff ?? status.warnMinutes;
   const body =
     status.sessionPhase === "pending"
-      ? `Session starts in ${mins} minute${mins === 1 ? "" : "s"}. Games will quit.`
+      ? `Curfew session starts in ${mins} minute${mins === 1 ? "" : "s"}.`
       : `Play window ends in ${mins} minute${mins === 1 ? "" : "s"}. Games will quit.`;
   toaster.toast({
     title: "Deck Curfew",

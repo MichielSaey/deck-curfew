@@ -86,13 +86,6 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def is_locked(settings: dict[str, Any], now: datetime) -> bool:
-    end = _parse_iso(settings.get("lockedUntil"))
-    if end is None:
-        return False
-    return now < end
-
-
 def is_session_lock(settings: dict[str, Any]) -> bool:
     """True when lockedUntil is paired with a session start."""
     return bool(settings.get("sessionStartsAt") and settings.get("lockedUntil"))
@@ -111,6 +104,42 @@ def session_phase(settings: dict[str, Any], now: datetime) -> str:
     return "active"
 
 
+def is_locked(settings: dict[str, Any], now: datetime) -> bool:
+    """
+    True only while enforcement commitment is in force.
+    Pending (future) sessions are NOT locked — countdown only, play allowed.
+    """
+    phase = session_phase(settings, now)
+    if phase == "pending":
+        return False
+    if phase == "active":
+        return True
+    end = _parse_iso(settings.get("lockedUntil"))
+    if end is None:
+        return False
+    # Schedule lock (no session): locked until end
+    if settings.get("sessionStartsAt"):
+        return False
+    return now < end
+
+
+def clear_expired_session_fields(settings: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """Clear session/lock fields that have fully ended."""
+    end = _parse_iso(settings.get("lockedUntil"))
+    if end is not None and now >= end:
+        settings = {**settings, "lockedUntil": None, "sessionStartsAt": None}
+    return settings
+
+
+def format_countdown(total_seconds: int) -> str:
+    total_seconds = max(0, int(total_seconds))
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
 def effective_block_after(settings: dict[str, Any], now: datetime) -> str:
     if is_weekend(now) and settings.get("weekendBlockAfter"):
         return settings["weekendBlockAfter"]
@@ -124,17 +153,14 @@ def windows_for_day(settings: dict[str, Any], now: datetime) -> list[dict[str, s
 
 
 def is_play_allowed(settings: dict[str, Any], now: datetime) -> bool:
-    """Play is only restricted while locked. Unlocked = always allowed."""
-    if not is_locked(settings, now):
-        return True
-
+    """Play is only restricted while locked/active. Pending countdown = allowed."""
     phase = session_phase(settings, now)
     if phase == "pending":
-        # Session armed but not started — still allowed to play (good for testing).
         return True
     if phase == "active":
-        # Active session: block everything until the session ends.
         return False
+    if not is_locked(settings, now):
+        return True
 
     mode = settings.get("mode", "block_after")
     current = now.hour * 60 + now.minute
@@ -164,14 +190,13 @@ def is_play_allowed(settings: dict[str, Any], now: datetime) -> bool:
 
 
 def next_cutoff(settings: dict[str, Any], now: datetime) -> Optional[datetime]:
-    """Next moment play becomes disallowed (while locked)."""
-    if not is_locked(settings, now):
-        return None
-
+    """Next moment play becomes disallowed."""
     phase = session_phase(settings, now)
     if phase == "pending":
         return _parse_iso(settings.get("sessionStartsAt"))
     if phase == "active":
+        return None
+    if not is_locked(settings, now):
         return None
 
     mode = settings.get("mode", "block_after")
@@ -253,30 +278,45 @@ def build_session(now: datetime, duration_minutes: int, delay_minutes: int = 0) 
 def status_payload(settings: dict[str, Any], now: Optional[datetime] = None) -> dict[str, Any]:
     now = now or datetime.now()
     settings = normalize_settings(settings)
-    locked = is_locked(settings, now)
     phase = session_phase(settings, now)
+    locked = is_locked(settings, now)
     play_allowed = is_play_allowed(settings, now)
-    cutoff = next_cutoff(settings, now) if locked and play_allowed else None
-    allow_at = next_allow(settings, now) if locked and not play_allowed else None
+    session_active = phase == "active"
+
+    cutoff = next_cutoff(settings, now) if (phase == "pending" or (locked and play_allowed)) else None
+    allow_at = next_allow(settings, now) if (session_active or (locked and not play_allowed)) else None
 
     warn_minutes = int(settings.get("warnMinutes", 5))
     minutes_to_cutoff: Optional[int] = None
+    countdown_seconds: Optional[int] = None
     should_warn = False
-    if cutoff is not None:
-        delta = cutoff - now
-        minutes_to_cutoff = max(0, int(delta.total_seconds() // 60))
-        # For pending sessions, always warn in the last minute if warnMinutes is 0+
-        should_warn = 0 < delta.total_seconds() <= max(warn_minutes, 1) * 60
 
-    if not locked:
-        status_line = "Unlocked — no active session"
-    elif phase == "pending" and cutoff is not None:
-        mins = max(1, int((cutoff - now).total_seconds() // 60))
-        status_line = f"Session starts in ~{mins} min — play still allowed"
-    elif phase == "active" and allow_at is not None:
-        status_line = f"Session active — blocked until {allow_at.strftime('%H:%M')}"
+    if phase == "pending":
+        start = _parse_iso(settings.get("sessionStartsAt"))
+        if start is not None:
+            countdown_seconds = max(0, int((start - now).total_seconds()))
+            cutoff = start
+            minutes_to_cutoff = countdown_seconds // 60
+            should_warn = 0 < countdown_seconds <= max(warn_minutes, 1) * 60
+    elif phase == "active":
+        end = _parse_iso(settings.get("lockedUntil"))
+        if end is not None:
+            countdown_seconds = max(0, int((end - now).total_seconds()))
+            allow_at = end
+    elif cutoff is not None:
+        delta = cutoff - now
+        countdown_seconds = max(0, int(delta.total_seconds()))
+        minutes_to_cutoff = countdown_seconds // 60
+        should_warn = 0 < countdown_seconds <= warn_minutes * 60
+
+    if phase == "pending" and countdown_seconds is not None:
+        status_line = f"Countdown {format_countdown(countdown_seconds)} — session not active yet"
+    elif phase == "active" and countdown_seconds is not None:
+        status_line = f"Session active — {format_countdown(countdown_seconds)} left"
     elif phase == "active":
         status_line = "Session active — games blocked"
+    elif not locked:
+        status_line = "Unlocked — no active session"
     elif play_allowed and cutoff is not None:
         status_line = f"Play allowed until {cutoff.strftime('%H:%M')}"
     elif play_allowed:
@@ -287,12 +327,14 @@ def status_payload(settings: dict[str, Any], now: Optional[datetime] = None) -> 
         status_line = "Blocked"
 
     lock_line = None
-    if locked and settings.get("lockedUntil"):
+    if phase == "pending" and countdown_seconds is not None:
+        lock_line = "Upcoming session — play allowed until countdown hits zero"
+    elif phase == "active" and settings.get("lockedUntil"):
         end = datetime.fromisoformat(settings["lockedUntil"])
-        if phase in ("pending", "active"):
-            lock_line = f"Session locked until {end.strftime('%H:%M')} (no cancel)"
-        else:
-            lock_line = f"Settings locked until {end.strftime('%a %Y-%m-%d %H:%M')}"
+        lock_line = f"Session locked until {end.strftime('%H:%M')} (no cancel)"
+    elif locked and settings.get("lockedUntil"):
+        end = datetime.fromisoformat(settings["lockedUntil"])
+        lock_line = f"Settings locked until {end.strftime('%a %Y-%m-%d %H:%M')}"
 
     return {
         "now": now.isoformat(timespec="seconds"),
@@ -300,11 +342,13 @@ def status_payload(settings: dict[str, Any], now: Optional[datetime] = None) -> 
         "lockedUntil": settings.get("lockedUntil"),
         "sessionStartsAt": settings.get("sessionStartsAt"),
         "sessionPhase": phase,
+        "sessionActive": session_active,
         "playAllowed": play_allowed,
-        "shouldBlockPlay": locked and not play_allowed,
+        "shouldBlockPlay": session_active or (locked and not play_allowed),
         "blockAction": "terminate",
         "warnMinutes": warn_minutes,
         "minutesToCutoff": minutes_to_cutoff,
+        "countdownSeconds": countdown_seconds,
         "shouldWarn": should_warn,
         "cutoffAt": cutoff.isoformat(timespec="seconds") if cutoff else None,
         "allowAt": allow_at.isoformat(timespec="seconds") if allow_at else None,
