@@ -1,6 +1,6 @@
 {
   "name": "deck-curfew",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Schedule-based game blocker for Steam Deck (Decky Loader).",
   "type": "module",
   "scripts": {

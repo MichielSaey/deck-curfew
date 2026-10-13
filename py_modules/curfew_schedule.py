@@ -20,6 +20,7 @@ def default_settings() -> dict[str, Any]:
         "blockAction": "terminate",
         "blockAfter": "21:00",
         "weekendBlockAfter": "22:00",
+        "autoUpdate": True,
         "days": {
             "mon": [{"start": "00:00", "end": "21:00"}],
             "tue": [{"start": "00:00", "end": "21:00"}],
@@ -71,6 +72,7 @@ def normalize_settings(raw: Optional[dict[str, Any]]) -> dict[str, Any]:
     merged["blockAction"] = "terminate"
     if merged.get("mode") not in ("block_after", "allow_windows"):
         merged["mode"] = "block_after"
+    merged["autoUpdate"] = bool(merged.get("autoUpdate", True))
     for key in ("lockedUntil", "sessionStartsAt"):
         if merged.get(key) == "":
             merged[key] = None

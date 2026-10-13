@@ -1,7 +1,9 @@
 import asyncio
+import json
 import os
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 import decky
@@ -18,6 +20,11 @@ from curfew_schedule import (  # noqa: E402
     status_payload,
 )
 from enforce_games import kill_running_steam_games  # noqa: E402
+from updater import (  # noqa: E402
+    check_latest_release,
+    install_from_zip_url,
+    read_installed_version,
+)
 
 try:
     from settings import SettingsManager  # type: ignore
@@ -25,6 +32,8 @@ except ImportError:
     SettingsManager = None  # type: ignore
 
 SETTINGS_KEY = "curfew"
+PLUGIN_DIR = Path(__file__).resolve().parent
+UPDATE_CHECK_SECONDS = 6 * 60 * 60
 
 
 class _FileSettings:
@@ -35,8 +44,6 @@ class _FileSettings:
         self.settings: dict[str, Any] = {}
 
     def read(self) -> None:
-        import json
-
         if not os.path.isfile(self.path):
             self.settings = {}
             return
@@ -44,8 +51,6 @@ class _FileSettings:
             self.settings = json.load(fh)
 
     def commit(self) -> None:
-        import json
-
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as fh:
             json.dump(self.settings, fh, indent=2)
@@ -76,18 +81,30 @@ settings = _init_settings()
 class Plugin:
     async def _main(self):
         decky.logger.info("Deck Curfew backend starting")
+        self._update_info: dict[str, Any] = {
+            "current": read_installed_version(PLUGIN_DIR),
+            "latest": None,
+            "updateAvailable": False,
+            "downloadUrl": None,
+            "releaseUrl": None,
+            "error": None,
+            "lastChecked": None,
+            "needsReload": False,
+        }
         self._ensure_defaults()
         self._enforce_task = asyncio.create_task(self._enforce_loop())
+        self._update_task = asyncio.create_task(self._update_loop())
 
     async def _unload(self):
         decky.logger.info("Deck Curfew backend unloading")
-        task = getattr(self, "_enforce_task", None)
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        for name in ("_enforce_task", "_update_task"):
+            task = getattr(self, name, None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     async def _uninstall(self):
         decky.logger.info("Deck Curfew uninstall")
@@ -114,6 +131,73 @@ class Plugin:
                 decky.logger.error("Curfew enforce loop error: %s", exc)
             await asyncio.sleep(3)
 
+    async def _update_loop(self):
+        """Periodic GitHub release checks; auto-install when unlocked."""
+        await asyncio.sleep(20)  # let Steam/network settle after boot
+        while True:
+            try:
+                cfg = self._load()
+                if cfg.get("autoUpdate", True):
+                    await self._refresh_update_info()
+                    info = self._update_info
+                    now = datetime.now()
+                    if (
+                        info.get("updateAvailable")
+                        and info.get("downloadUrl")
+                        and not is_locked(cfg, now)
+                        and session_phase(cfg, now) != "active"
+                    ):
+                        decky.logger.info("Auto-installing update %s", info.get("latest"))
+                        await self._install_update_internal()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                decky.logger.error("Curfew update loop error: %s", exc)
+            await asyncio.sleep(UPDATE_CHECK_SECONDS)
+
+    async def _refresh_update_info(self) -> dict[str, Any]:
+        current = read_installed_version(PLUGIN_DIR)
+        info = await asyncio.to_thread(check_latest_release, current)
+        info["lastChecked"] = datetime.now().isoformat(timespec="seconds")
+        info["needsReload"] = bool(self._update_info.get("needsReload"))
+        self._update_info = info
+        return info
+
+    async def _install_update_internal(self) -> dict[str, Any]:
+        info = self._update_info or {}
+        url = info.get("downloadUrl")
+        if not url:
+            info = await self._refresh_update_info()
+            url = info.get("downloadUrl")
+        if not url:
+            raise Exception(info.get("error") or "No update download URL available")
+
+        result = await asyncio.to_thread(install_from_zip_url, url, PLUGIN_DIR)
+        self._update_info["needsReload"] = True
+        self._update_info["updateAvailable"] = False
+        self._update_info["current"] = result.get("installedVersion")
+        try:
+            await decky.emit("curfew_updated", result.get("installedVersion"))
+        except Exception:
+            pass
+        # Best-effort Decky restart (may require passwordless sudo)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "systemctl",
+                "restart",
+                "plugin_loader.service",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+        except Exception:
+            pass
+        return {
+            **self._update_info,
+            "installed": True,
+            "installedVersion": result.get("installedVersion"),
+        }
+
     def _ensure_defaults(self) -> dict[str, Any]:
         raw = settings.getSetting(SETTINGS_KEY, None)
         normalized = normalize_settings(raw)
@@ -136,16 +220,40 @@ class Plugin:
             settings.commit()
         return normalized
 
+    def _status(self) -> dict[str, Any]:
+        status = status_payload(self._load(), datetime.now())
+        status["pluginVersion"] = read_installed_version(PLUGIN_DIR)
+        status["update"] = self._update_info
+        return status
+
     async def get_status(self) -> dict[str, Any]:
-        cfg = self._load()
-        return status_payload(cfg, datetime.now())
+        return self._status()
 
     async def get_settings(self) -> dict[str, Any]:
         return self._load()
 
+    async def check_for_update(self) -> dict[str, Any]:
+        return await self._refresh_update_info()
+
+    async def install_update(self) -> dict[str, Any]:
+        cfg = self._load()
+        now = datetime.now()
+        if is_locked(cfg, now) or session_phase(cfg, now) == "active":
+            raise Exception("Cannot install updates while a session/lock is active.")
+        return await self._install_update_internal()
+
+    async def set_auto_update(self, enabled: bool) -> dict[str, Any]:
+        cfg = self._load()
+        now = datetime.now()
+        if is_locked(cfg, now):
+            raise Exception("Curfew is locked — settings cannot be changed.")
+        cfg["autoUpdate"] = bool(enabled)
+        self._save(cfg)
+        return self._status()
+
     async def enforce_now(self) -> dict[str, Any]:
         """Frontend-triggered enforce: kill games if currently blocking."""
-        status = status_payload(self._load(), datetime.now())
+        status = self._status()
         killed: list = []
         if status.get("shouldBlockPlay"):
             killed = kill_running_steam_games()
@@ -167,6 +275,7 @@ class Plugin:
             "blockAfter",
             "weekendBlockAfter",
             "days",
+            "autoUpdate",
         }
         for key, value in (patch or {}).items():
             if key in allowed_keys:
@@ -178,8 +287,8 @@ class Plugin:
             parse_hhmm(cfg["weekendBlockAfter"])
 
         cfg["blockAction"] = "terminate"
-        saved = self._save(cfg)
-        return status_payload(saved, now)
+        self._save(cfg)
+        return self._status()
 
     async def lock_curfew(self, until_iso: str) -> dict[str, Any]:
         """Lock settings until until_iso. No unlock API — wait for expiry."""
@@ -202,9 +311,9 @@ class Plugin:
         cfg["lockedUntil"] = until.replace(microsecond=0).isoformat()
         cfg["sessionStartsAt"] = None
         cfg["blockAction"] = "terminate"
-        saved = self._save(cfg)
+        self._save(cfg)
         decky.logger.info("Curfew locked until %s", cfg["lockedUntil"])
-        return status_payload(saved, now)
+        return self._status()
 
     async def lock_preset(self, preset: str) -> dict[str, Any]:
         """Convenience presets: tomorrow_8, days_3, days_7."""
@@ -243,14 +352,13 @@ class Plugin:
         cfg["sessionStartsAt"] = session["sessionStartsAt"]
         cfg["lockedUntil"] = session["lockedUntil"]
         cfg["blockAction"] = "terminate"
-        saved = self._save(cfg)
+        self._save(cfg)
         decky.logger.info(
             "Session armed: start=%s end=%s",
             cfg["sessionStartsAt"],
             cfg["lockedUntil"],
         )
-        # If starting immediately, enforce right away
-        status = status_payload(saved, now)
+        status = self._status()
         if status.get("shouldBlockPlay"):
             killed = kill_running_steam_games()
             status["killed"] = killed
@@ -268,6 +376,6 @@ class Plugin:
 
         cfg["sessionStartsAt"] = None
         cfg["lockedUntil"] = None
-        saved = self._save(cfg)
+        self._save(cfg)
         decky.logger.info("Pending session cancelled")
-        return status_payload(saved, now)
+        return self._status()

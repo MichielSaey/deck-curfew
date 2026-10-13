@@ -16,7 +16,21 @@ export type CurfewSettings = {
   blockAction: "terminate";
   blockAfter: string;
   weekendBlockAfter: string;
+  autoUpdate: boolean;
   days: Record<DayKey, TimeWindow[]>;
+};
+
+export type UpdateInfo = {
+  current: string;
+  latest: string | null;
+  updateAvailable: boolean;
+  downloadUrl: string | null;
+  releaseUrl: string | null;
+  error: string | null;
+  lastChecked: string | null;
+  needsReload?: boolean;
+  installed?: boolean;
+  installedVersion?: string;
 };
 
 export type CurfewStatus = {
@@ -38,4 +52,6 @@ export type CurfewStatus = {
   statusLine: string;
   lockLine: string | null;
   settings: CurfewSettings;
+  pluginVersion?: string;
+  update?: UpdateInfo;
 };

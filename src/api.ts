@@ -1,5 +1,5 @@
 import { callable } from "@decky/api";
-import type { CurfewStatus } from "./types";
+import type { CurfewStatus, UpdateInfo } from "./types";
 
 export const getStatus = callable<[], CurfewStatus>("get_status");
 export const updateSchedule = callable<[patch: Record<string, unknown>], CurfewStatus>(
@@ -12,3 +12,6 @@ export const startSession = callable<
   CurfewStatus
 >("start_session");
 export const cancelPendingSession = callable<[], CurfewStatus>("cancel_pending_session");
+export const checkForUpdate = callable<[], UpdateInfo>("check_for_update");
+export const installUpdate = callable<[], UpdateInfo>("install_update");
+export const setAutoUpdate = callable<[enabled: boolean], CurfewStatus>("set_auto_update");

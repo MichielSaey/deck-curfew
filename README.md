@@ -4,15 +4,14 @@
 
 Outside your play window, running games are **hard-quit** and new launches are blocked. Once you **lock** curfew or start a session, you cannot edit the schedule or turn it off in the plugin UI until the commitment ends.
 
-> **Status:** early v0.2 — works in principle; test on your Deck before relying on it.
-
 ## Features
 
 - **Timed sessions:** block all games for a period — start now, or after a delay (handy for testing)
 - Weekday / weekend “block after” schedule + long schedule locks
 - Warning toast before session/cutoff
-- Hard quit via Steam `TerminateApp`
-- Launch block via `RunGame` patch
+- Hard quit via backend process kill + Steam `TerminateApp`
+- Launch block via `RunGame` / game-action hooks
+- **Auto-update** from [GitHub Releases](https://github.com/MichielSaey/deck-curfew/releases) (optional; installs only when unlocked)
 - No in-plugin cancel/unlock while a session or lock is active (wait for commitment end)
 
 ## Honest limits
@@ -21,7 +20,17 @@ The Deck is an open device. Uninstalling this plugin, deleting its settings, or 
 
 Steam Families already offers play windows for **Child** accounts. Deck Curfew is for **same-account self-control** in Game Mode.
 
-## Install (ZIP)
+## Install
+
+### From a release ZIP
+
+Download `DeckCurfew-vX.Y.Z.zip` from [Releases](https://github.com/MichielSaey/deck-curfew/releases), then:
+
+**Decky → settings → Developer → Install Plugin from ZIP**
+
+Reload Decky if it does not appear.
+
+### Build locally
 
 On a machine with Node + pnpm 9:
 
@@ -30,11 +39,15 @@ pnpm i
 pnpm run package
 ```
 
-That writes `out/DeckCurfew-v0.2.0.zip`. Copy it to the Deck, then:
+That writes `out/DeckCurfew-v0.3.0.zip`.
 
-**Decky → settings → Developer → Install Plugin from ZIP**
+### Deploy over SSH (dev)
 
-Reload Decky if it does not appear. Store submission comes later once it’s battle-tested.
+```bash
+./scripts/deploy-deck.sh [user@host]
+```
+
+Default host: `deck@steamdeck.local` (falls back to `deck@192.168.0.193`).
 
 ## Develop
 
@@ -46,6 +59,10 @@ pnpm run package   # installable ZIP → out/
 ```
 
 Frontend changes require a rebuild. Backend (`main.py`, `py_modules/`) is picked up on Decky reload.
+
+## Updates
+
+With **Auto-update** enabled (default), the plugin checks GitHub Releases every few hours and installs when no session/lock is active. You can also use **Check for updates** / **Install** in the plugin UI.
 
 ## Reference
 

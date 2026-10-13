@@ -4,13 +4,23 @@ import {
   PanelSection,
   PanelSectionRow,
   TextField,
+  ToggleField,
   showModal,
 } from "@decky/ui";
 import { toaster } from "@decky/api";
 import { useCallback, useEffect, useState } from "react";
-import { cancelPendingSession, getStatus, lockPreset, startSession, updateSchedule } from "./api";
+import {
+  cancelPendingSession,
+  checkForUpdate,
+  getStatus,
+  installUpdate,
+  lockPreset,
+  setAutoUpdate,
+  startSession,
+  updateSchedule,
+} from "./api";
 import { applyStatus } from "./enforce";
-import type { CurfewStatus } from "./types";
+import type { CurfewStatus, UpdateInfo } from "./types";
 
 function isHhMm(value: string): boolean {
   return /^([01]?\d|2[0-3]):[0-5]\d$/.test(value.trim());
@@ -51,6 +61,7 @@ export function Content() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -59,6 +70,7 @@ export function Content() {
       setBlockAfter(next.settings.blockAfter);
       setWeekendBlockAfter(next.settings.weekendBlockAfter);
       setWarnMinutes(String(next.settings.warnMinutes));
+      if (next.update) setUpdateInfo(next.update);
       setError(null);
       void applyStatus(next);
       setNowMs(Date.now());
@@ -200,8 +212,70 @@ export function Content() {
     }
   };
 
+  const onCheckUpdate = async () => {
+    setBusy(true);
+    try {
+      const info = await checkForUpdate();
+      setUpdateInfo(info);
+      setError(null);
+      toaster.toast({
+        title: "Deck Curfew",
+        body: info.updateAvailable
+          ? `Update available: v${info.latest}`
+          : `Up to date (v${info.current})`,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onInstallUpdate = () => {
+    showModal(
+      <ConfirmModal
+        strTitle="Install update?"
+        strDescription="Downloads the latest release from GitHub and reloads Decky. Not available while a session or lock is active."
+        strOKButtonText="Install"
+        onOK={async () => {
+          setBusy(true);
+          try {
+            const info = await installUpdate();
+            setUpdateInfo(info);
+            setError(null);
+            toaster.toast({
+              title: "Deck Curfew",
+              body: `Installed v${info.installedVersion ?? info.latest}. Reloading…`,
+            });
+            await refresh();
+          } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
+    );
+  };
+
+  const onToggleAutoUpdate = async (enabled: boolean) => {
+    setBusy(true);
+    try {
+      const next = await setAutoUpdate(enabled);
+      setStatus(next);
+      if (next.update) setUpdateInfo(next.update);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const locked = status?.locked ?? false;
   const phase = status?.sessionPhase ?? "none";
+  const version = status?.pluginVersion ?? updateInfo?.current ?? "…";
+  const autoUpdate = status?.settings.autoUpdate ?? true;
 
   const pendingSeconds =
     phase === "pending" ? secondsUntil(status?.sessionStartsAt, nowMs) : null;
@@ -420,6 +494,49 @@ export function Content() {
           </PanelSection>
         </>
       ) : null}
+
+      <PanelSection title="Updates">
+        <PanelSectionRow>
+          <div style={{ padding: "4px 0" }}>
+            Installed v{version}
+            {updateInfo?.latest && updateInfo.updateAvailable
+              ? ` · latest v${updateInfo.latest}`
+              : updateInfo?.latest
+                ? ` · up to date`
+                : ""}
+          </div>
+        </PanelSectionRow>
+        {updateInfo?.error && (
+          <PanelSectionRow>
+            <div style={{ color: "#f66", padding: "4px 0", fontSize: "0.9em" }}>
+              {updateInfo.error}
+            </div>
+          </PanelSectionRow>
+        )}
+        {!locked && phase !== "active" && (
+          <PanelSectionRow>
+            <ToggleField
+              label="Auto-update"
+              description="Check GitHub Releases every few hours and install when unlocked."
+              checked={autoUpdate}
+              disabled={busy}
+              onChange={(value: boolean) => void onToggleAutoUpdate(value)}
+            />
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={busy} onClick={() => void onCheckUpdate()}>
+            Check for updates
+          </ButtonItem>
+        </PanelSectionRow>
+        {updateInfo?.updateAvailable && !locked && phase !== "active" && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" disabled={busy} onClick={onInstallUpdate}>
+              Install v{updateInfo.latest}
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+      </PanelSection>
 
       <PanelSection title="About">
         <PanelSectionRow>
