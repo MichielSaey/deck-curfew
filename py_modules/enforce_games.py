@@ -36,32 +36,45 @@ def get_all_children(pid: int) -> list[str]:
 
 
 def find_reaper_pids() -> list[tuple[int, Optional[str]]]:
-    """Return (pid, appid) for Steam reaper game hosts."""
+    """Return (pid, appid) for Steam reaper / launch-wrapper game hosts."""
     found: list[tuple[int, Optional[str]]] = []
-    try:
-        # Match steam's reaper launcher that carries AppId=
-        out = subprocess.check_output(
-            ["pgrep", "-af", r"/reaper(\s|$).*AppId="],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        )
-    except subprocess.CalledProcessError:
-        return found
-    except FileNotFoundError:
-        return found
+    # NOTE: pgrep uses basic/ERE — do not use Python \s shortcuts.
+    # Real Steam cmdlines look like:
+    #   .../reaper SteamLaunch AppId=123 -- ...
+    #   .../steam-launch-wrapper ... AppId=123 ...
+    patterns = (
+        "reaper.*AppId=",
+        "steam-launch-wrapper.*AppId=",
+    )
+    seen: set[int] = set()
+    for pattern in patterns:
+        try:
+            out = subprocess.check_output(
+                ["pgrep", "-af", pattern],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError:
+            continue
+        except FileNotFoundError:
+            return found
 
-    for line in out.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if not parts or not parts[0].isdigit():
-            continue
-        pid = int(parts[0])
-        cmd = parts[1] if len(parts) > 1 else ""
-        match = REAPER_RE.search(cmd)
-        appid = match.group(1) if match else None
-        found.append((pid, appid))
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 1)
+            if not parts or not parts[0].isdigit():
+                continue
+            pid = int(parts[0])
+            if pid in seen:
+                continue
+            cmd = parts[1] if len(parts) > 1 else ""
+            # Prefer the actual reaper host over wrappers when both match
+            match = REAPER_RE.search(cmd)
+            appid = match.group(1) if match else None
+            seen.add(pid)
+            found.append((pid, appid))
     return found
 
 
