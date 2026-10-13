@@ -184,7 +184,7 @@ class Plugin:
 
     async def start_session(self, duration_minutes: int, delay_minutes: int = 0) -> dict[str, Any]:
         """
-        Freedom-style session: block all games for `duration_minutes`,
+        Timed session: block all games for `duration_minutes`,
         optionally starting after `delay_minutes` (play still allowed during delay).
         Settings stay frozen until the session ends — no cancel.
         """

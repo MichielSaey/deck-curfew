@@ -5,7 +5,7 @@
   "api_version": 1,
   "publish": {
     "tags": ["productivity", "self-control", "schedule"],
-    "description": "Freedom-style schedule lock for Steam Deck: hard-quit games outside your play window. Once locked, settings cannot be changed until the commitment ends.",
+    "description": "Schedule lock for Steam Deck: hard-quit games outside your play window. Once locked, settings cannot be changed until the commitment ends.",
     "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
   }
 }

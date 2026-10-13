@@ -91,7 +91,7 @@ export function Content() {
     showModal(
       <ConfirmModal
         strTitle="Start curfew session?"
-        strDescription={`Like Freedom: games will be blocked ${when}. You cannot cancel once started.`}
+        strDescription={`Games will be blocked ${when}. You cannot cancel once started.`}
         strOKButtonText="Start session"
         onOK={async () => {
           setBusy(true);
@@ -197,7 +197,7 @@ export function Content() {
           <PanelSection title="Start session">
             <PanelSectionRow>
               <div style={{ padding: "4px 0", opacity: 0.85 }}>
-                Freedom-style: block all games for a period. Start now, or after a delay
+                Block all games for a period. Start now, or after a delay
                 (handy for testing — launch a game first).
               </div>
             </PanelSectionRow>

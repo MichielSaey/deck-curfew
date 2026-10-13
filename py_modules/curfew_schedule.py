@@ -11,7 +11,7 @@ DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 def default_settings() -> dict[str, Any]:
     return {
         "lockedUntil": None,
-        # Freedom-style session: block all play between sessionStartsAt and lockedUntil.
+        # Timed session: block all play between sessionStartsAt and lockedUntil.
         # If sessionStartsAt is null while locked, enforce the daily schedule instead.
         "sessionStartsAt": None,
         "timezone": "local",
@@ -94,12 +94,12 @@ def is_locked(settings: dict[str, Any], now: datetime) -> bool:
 
 
 def is_session_lock(settings: dict[str, Any]) -> bool:
-    """True when lockedUntil is paired with a session start (Freedom session)."""
+    """True when lockedUntil is paired with a session start."""
     return bool(settings.get("sessionStartsAt") and settings.get("lockedUntil"))
 
 
 def session_phase(settings: dict[str, Any], now: datetime) -> str:
-    """none | pending | active — for Freedom sessions only."""
+    """none | pending | active — for timed sessions only."""
     if not is_session_lock(settings):
         return "none"
     start = _parse_iso(settings.get("sessionStartsAt"))
@@ -133,7 +133,7 @@ def is_play_allowed(settings: dict[str, Any], now: datetime) -> bool:
         # Session armed but not started — still allowed to play (good for testing).
         return True
     if phase == "active":
-        # Freedom session: block everything until the session ends.
+        # Active session: block everything until the session ends.
         return False
 
     mode = settings.get("mode", "block_after")
@@ -232,7 +232,7 @@ def next_allow(settings: dict[str, Any], now: datetime) -> Optional[datetime]:
 
 
 def build_session(now: datetime, duration_minutes: int, delay_minutes: int = 0) -> dict[str, str]:
-    """Return sessionStartsAt / lockedUntil for a Freedom-style session."""
+    """Return sessionStartsAt / lockedUntil for a timed block session."""
     if duration_minutes < 1:
         raise ValueError("Session duration must be at least 1 minute")
     if duration_minutes > 24 * 60:
