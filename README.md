@@ -21,20 +21,20 @@ The Deck is an open device. Uninstalling this plugin, deleting its settings, or 
 
 Steam Families already offers play windows for **Child** accounts. Deck Curfew is for **same-account self-control** in Game Mode.
 
-## Install (from source / ZIP)
+## Install (ZIP)
 
-1. Build on a machine with Node + pnpm 9:
+On a machine with Node + pnpm 9 and `zip`:
 
-   ```bash
-   pnpm i
-   pnpm run build
-   ```
+```bash
+pnpm i
+pnpm run package
+```
 
-2. Zip the plugin so the archive root contains the plugin folder (with `dist/`, `main.py`, `plugin.json`, `package.json`, `py_modules/`, …).
+That writes `out/DeckCurfew-v0.1.0.zip`. Copy it to the Deck, then:
 
-3. On the Deck: Decky → settings → Developer → **Install Plugin from ZIP**.
+**Decky → settings → Developer → Install Plugin from ZIP**
 
-Store submission comes later once it’s battle-tested.
+Reload Decky if it does not appear. Store submission comes later once it’s battle-tested.
 
 ## Develop
 
@@ -42,6 +42,7 @@ Store submission comes later once it’s battle-tested.
 pnpm i
 pnpm run build
 pnpm test
+pnpm run package   # installable ZIP → out/
 ```
 
 Frontend changes require a rebuild. Backend (`main.py`, `py_modules/`) is picked up on Decky reload.

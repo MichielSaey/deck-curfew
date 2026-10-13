@@ -6,7 +6,8 @@
   "scripts": {
     "build": "rollup -c",
     "watch": "rollup -c -w",
-    "test": "python3 -m unittest discover -s tests -p 'test_*.py' -v"
+    "test": "python3 -m unittest discover -s tests -p 'test_*.py' -v",
+    "package": "bash scripts/package.sh"
   },
   "repository": {
     "type": "git",
