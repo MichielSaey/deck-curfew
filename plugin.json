@@ -1,11 +1,11 @@
 {
-  "name": "Example Plugin",
-  "author": "John Doe",
-  "flags": ["debug", "_root"],
+  "name": "Deck Curfew",
+  "author": "Michiel Saey",
+  "flags": [],
   "api_version": 1,
   "publish": {
-    "tags": ["template", "root"],
-    "description": "Decky example plugin.",
+    "tags": ["productivity", "self-control", "schedule"],
+    "description": "Freedom-style schedule lock for Steam Deck: hard-quit games outside your play window. Once locked, settings cannot be changed until the commitment ends.",
     "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
   }
 }
