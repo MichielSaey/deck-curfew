@@ -7,7 +7,7 @@ import { startEnforcement, stopEnforcement } from "./enforce";
 
 export default definePlugin(() => {
   console.log("Deck Curfew initializing");
-  startEnforcement(() => getStatus(), 10000);
+  startEnforcement(() => getStatus(), 3000);
 
   return {
     name: "Deck Curfew",

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 from datetime import datetime, timedelta
@@ -5,7 +6,7 @@ from typing import Any, Optional
 
 import decky
 
-# Bundled pure schedule helpers
+# Bundled helpers
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "py_modules"))
 from curfew_schedule import (  # noqa: E402
     build_session,
@@ -16,6 +17,7 @@ from curfew_schedule import (  # noqa: E402
     session_phase,
     status_payload,
 )
+from enforce_games import kill_running_steam_games  # noqa: E402
 
 try:
     from settings import SettingsManager  # type: ignore
@@ -75,9 +77,17 @@ class Plugin:
     async def _main(self):
         decky.logger.info("Deck Curfew backend starting")
         self._ensure_defaults()
+        self._enforce_task = asyncio.create_task(self._enforce_loop())
 
     async def _unload(self):
         decky.logger.info("Deck Curfew backend unloading")
+        task = getattr(self, "_enforce_task", None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def _uninstall(self):
         decky.logger.info("Deck Curfew uninstall")
@@ -85,11 +95,29 @@ class Plugin:
     async def _migration(self):
         pass
 
+    async def _enforce_loop(self):
+        """Backend watchdog: while blocking, kill Steam game process trees."""
+        while True:
+            try:
+                status = status_payload(self._load(), datetime.now())
+                if status.get("shouldBlockPlay"):
+                    killed = kill_running_steam_games()
+                    if killed:
+                        decky.logger.info("Curfew backend killed: %s", killed)
+                        try:
+                            await decky.emit("curfew_enforced", killed)
+                        except Exception:
+                            pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                decky.logger.error("Curfew enforce loop error: %s", exc)
+            await asyncio.sleep(3)
+
     def _ensure_defaults(self) -> dict[str, Any]:
         raw = settings.getSetting(SETTINGS_KEY, None)
         normalized = normalize_settings(raw)
         now = datetime.now()
-        # Only drop fields after the end time — keep pending countdowns
         cleaned = clear_expired_session_fields(normalized, now)
         if cleaned != normalized or raw != cleaned:
             settings.setSetting(SETTINGS_KEY, cleaned)
@@ -115,6 +143,17 @@ class Plugin:
     async def get_settings(self) -> dict[str, Any]:
         return self._load()
 
+    async def enforce_now(self) -> dict[str, Any]:
+        """Frontend-triggered enforce: kill games if currently blocking."""
+        status = status_payload(self._load(), datetime.now())
+        killed: list = []
+        if status.get("shouldBlockPlay"):
+            killed = kill_running_steam_games()
+            if killed:
+                decky.logger.info("Curfew enforce_now killed: %s", killed)
+        status["killed"] = killed
+        return status
+
     async def update_schedule(self, patch: dict[str, Any]) -> dict[str, Any]:
         """Update schedule fields. Refuses while locked."""
         cfg = self._load()
@@ -133,7 +172,6 @@ class Plugin:
             if key in allowed_keys:
                 cfg[key] = value
 
-        # Validate times early
         if cfg.get("blockAfter"):
             parse_hhmm(cfg["blockAfter"])
         if cfg.get("weekendBlockAfter"):
@@ -158,12 +196,11 @@ class Plugin:
         if until <= now:
             raise Exception("Lock end must be in the future.")
 
-        # Sanity: max 365 days
         if until - now > timedelta(days=365):
             raise Exception("Lock commitment cannot exceed 365 days.")
 
         cfg["lockedUntil"] = until.replace(microsecond=0).isoformat()
-        cfg["sessionStartsAt"] = None  # schedule lock, not a timed session
+        cfg["sessionStartsAt"] = None
         cfg["blockAction"] = "terminate"
         saved = self._save(cfg)
         decky.logger.info("Curfew locked until %s", cfg["lockedUntil"])
@@ -212,7 +249,12 @@ class Plugin:
             cfg["sessionStartsAt"],
             cfg["lockedUntil"],
         )
-        return status_payload(saved, now)
+        # If starting immediately, enforce right away
+        status = status_payload(saved, now)
+        if status.get("shouldBlockPlay"):
+            killed = kill_running_steam_games()
+            status["killed"] = killed
+        return status
 
     async def cancel_pending_session(self) -> dict[str, Any]:
         """Cancel a future countdown. Refuses if the session has already become active."""

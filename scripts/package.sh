@@ -47,7 +47,10 @@ if [[ "${INCLUDE_SOURCEMAP:-0}" == "1" ]] && [[ -f dist/index.js.map ]]; then
 fi
 
 cp -a main.py plugin.json package.json LICENSE README.md "${STAGE}/"
-cp -a py_modules/curfew_schedule.py "${STAGE}/py_modules/"
+cp -a py_modules/*.py "${STAGE}/py_modules/"
+# Do not ship tests or caches from py_modules
+rm -f "${STAGE}/py_modules/"*.pyc
+rm -rf "${STAGE}/py_modules/__pycache__"
 
 if [[ -d assets ]]; then
   mkdir -p "${STAGE}/assets"

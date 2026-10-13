@@ -60,7 +60,7 @@ export function Content() {
       setWeekendBlockAfter(next.settings.weekendBlockAfter);
       setWarnMinutes(String(next.settings.warnMinutes));
       setError(null);
-      applyStatus(next);
+      void applyStatus(next);
       setNowMs(Date.now());
     } catch (err) {
       console.error(err);
@@ -99,7 +99,7 @@ export function Content() {
         warnMinutes: warn,
       });
       setStatus(next);
-      applyStatus(next);
+      void applyStatus(next);
       setError(null);
       toaster.toast({ title: "Deck Curfew", body: "Schedule saved." });
     } catch (err) {
@@ -128,7 +128,7 @@ export function Content() {
           try {
             const next = await startSession(duration, delay);
             setStatus(next);
-            applyStatus(next);
+            void applyStatus(next);
             setError(null);
             toaster.toast({
               title: "Deck Curfew",
@@ -172,7 +172,7 @@ export function Content() {
           try {
             const next = await lockPreset(preset);
             setStatus(next);
-            applyStatus(next);
+            void applyStatus(next);
             setError(null);
             toaster.toast({ title: "Deck Curfew", body: `Locked until ${label}.` });
           } catch (err) {
@@ -190,7 +190,7 @@ export function Content() {
     try {
       const next = await cancelPendingSession();
       setStatus(next);
-      applyStatus(next);
+      void applyStatus(next);
       setError(null);
       toaster.toast({ title: "Deck Curfew", body: "Upcoming session cancelled." });
     } catch (err) {

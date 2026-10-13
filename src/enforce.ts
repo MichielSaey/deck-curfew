@@ -1,52 +1,121 @@
-import { toaster } from "@decky/api";
+import { toaster, callable } from "@decky/api";
 import { Router, replacePatch, callOriginal } from "@decky/ui";
 import type { CurfewStatus } from "./types";
 
-declare const SteamClient: {
-  Apps: {
-    TerminateApp: (appId: number | string, param1: boolean) => void;
-    RunGame: (...args: unknown[]) => unknown;
-  };
+type PatchHandle = { unpatch: () => void };
+type Unregisterable = { unregister: () => void };
+
+type SteamApps = {
+  TerminateApp?: (appId: string, force: boolean) => void;
+  RunGame?: (...args: unknown[]) => unknown;
+  CancelGameAction?: (gameActionId: number) => void;
+  CancelLaunch?: (appId: string) => void;
+  RegisterForGameActionStart?: (
+    callback: (gameActionId: number, appId: string, action: string, source: number) => void
+  ) => Unregisterable;
 };
 
-type PatchHandle = { unpatch: () => void };
+function getSteamApps(): SteamApps | null {
+  try {
+    // SteamClient is a Game Mode global
+    const sc = (globalThis as unknown as { SteamClient?: { Apps?: SteamApps } }).SteamClient;
+    return sc?.Apps ?? null;
+  } catch {
+    return null;
+  }
+}
+
+const enforceNow = callable<[], CurfewStatus & { killed?: unknown[] }>("enforce_now");
 
 let blockLaunches = false;
 let runGamePatch: PatchHandle | null = null;
+let gameActionReg: Unregisterable | null = null;
 let lastWarnKey: string | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let lastToastBlock = 0;
+
+function toastBlocked(): void {
+  const now = Date.now();
+  if (now - lastToastBlock < 2500) return;
+  lastToastBlock = now;
+  toaster.toast({
+    title: "Deck Curfew",
+    body: "Session active — games are blocked.",
+    duration: 3500,
+  });
+}
 
 function terminateRunningGames(): void {
-  const apps = Router.RunningApps ?? [];
-  for (const app of apps) {
+  const appsApi = getSteamApps();
+  const running = Router.RunningApps ?? [];
+  for (const app of running) {
     try {
-      // AppOverview typically exposes appid
-      const appId = app.appid;
-      if (appId != null && appId !== "") {
-        SteamClient.Apps.TerminateApp(appId, true);
-      }
+      const appId = String(app.appid ?? "");
+      if (!appId) continue;
+      appsApi?.TerminateApp?.(appId, true);
+      appsApi?.CancelLaunch?.(appId);
     } catch (err) {
-      console.error("Deck Curfew: failed to terminate app", err);
+      console.error("Deck Curfew: TerminateApp failed", err);
     }
   }
 }
 
 function ensureLaunchPatch(): void {
-  if (runGamePatch) return;
+  const appsApi = getSteamApps();
+  if (!appsApi?.RunGame) {
+    console.warn("Deck Curfew: SteamClient.Apps.RunGame not available yet");
+    return;
+  }
+
+  // Re-apply if Steam replaced the method out from under us
+  if (runGamePatch) {
+    try {
+      const current = appsApi.RunGame as unknown as { __deckyPatch?: unknown };
+      if (current?.__deckyPatch) return;
+      runGamePatch = null;
+    } catch {
+      runGamePatch = null;
+    }
+  }
+
   try {
-    runGamePatch = replacePatch(SteamClient.Apps, "RunGame", () => {
+    runGamePatch = replacePatch(appsApi, "RunGame", (_args: unknown[]) => {
       if (blockLaunches) {
-        toaster.toast({
-          title: "Deck Curfew",
-          body: "Play window closed. Games are blocked until the next allow window.",
-          duration: 4000,
-        });
-        return undefined;
+        console.log("Deck Curfew: blocked RunGame", _args?.[0]);
+        toastBlocked();
+        // Returning anything other than callOriginal skips the launch
+        return null;
       }
       return callOriginal;
     }) as PatchHandle;
+    console.log("Deck Curfew: RunGame patch installed");
   } catch (err) {
     console.error("Deck Curfew: failed to patch RunGame", err);
+  }
+}
+
+function ensureGameActionHook(): void {
+  if (gameActionReg) return;
+  const appsApi = getSteamApps();
+  if (!appsApi?.RegisterForGameActionStart) return;
+
+  try {
+    gameActionReg = appsApi.RegisterForGameActionStart((gameActionId, appId, action) => {
+      if (!blockLaunches) return;
+      console.log("Deck Curfew: cancelling game action", gameActionId, appId, action);
+      try {
+        appsApi.CancelGameAction?.(gameActionId);
+        appsApi.TerminateApp?.(String(appId), true);
+        appsApi.CancelLaunch?.(String(appId));
+      } catch (err) {
+        console.error("Deck Curfew: cancel game action failed", err);
+      }
+      toastBlocked();
+      void enforceNow().catch(() => undefined);
+    });
+    console.log("Deck Curfew: game action hook installed");
+  } catch (err) {
+    console.error("Deck Curfew: RegisterForGameActionStart failed", err);
   }
 }
 
@@ -66,23 +135,30 @@ function maybeWarn(status: CurfewStatus): void {
   });
 }
 
-export function applyStatus(status: CurfewStatus): void {
-  blockLaunches = status.shouldBlockPlay;
+export async function applyStatus(status: CurfewStatus): Promise<void> {
+  blockLaunches = Boolean(status.shouldBlockPlay);
   ensureLaunchPatch();
+  ensureGameActionHook();
   maybeWarn(status);
   if (status.shouldBlockPlay) {
     terminateRunningGames();
+    try {
+      await enforceNow();
+    } catch (err) {
+      console.error("Deck Curfew: enforce_now failed", err);
+    }
   }
 }
 
 export type StatusFetcher = () => Promise<CurfewStatus>;
 
-export function startEnforcement(fetchStatus: StatusFetcher, intervalMs = 10000): void {
-  ensureLaunchPatch();
+export function startEnforcement(fetchStatus: StatusFetcher, intervalMs = 3000): void {
   const tick = async () => {
     try {
+      ensureLaunchPatch();
+      ensureGameActionHook();
       const status = await fetchStatus();
-      applyStatus(status);
+      await applyStatus(status);
     } catch (err) {
       console.error("Deck Curfew: status poll failed", err);
     }
@@ -105,5 +181,13 @@ export function stopEnforcement(): void {
       console.error("Deck Curfew: unpatch failed", err);
     }
     runGamePatch = null;
+  }
+  if (gameActionReg) {
+    try {
+      gameActionReg.unregister();
+    } catch {
+      /* ignore */
+    }
+    gameActionReg = null;
   }
 }
